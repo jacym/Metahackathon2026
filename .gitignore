@@ -1,0 +1,17 @@
+# Local secrets — never commit a real LLM token
+config.js
+.env
+.env.*
+!.env.example
+node_modules/
+
+# Backend vehicle cache database (stable facts, monthly TTL)
+data/*.db
+data/*.db-*
+.cache/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

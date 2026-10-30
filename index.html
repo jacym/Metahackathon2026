@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>DriveMatch — Find the Vehicle That Fits Your Life</title>
+<meta name="description" content="DriveMatch helps you determine the best vehicle purchase through a personalized, step-by-step process." />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Sora:wght@700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<!-- NAV -->
+<header class="nav">
+  <a href="#" class="logo" aria-label="DriveMatch home">
+    <span class="logo-mark">◈</span> Drive<span>Match</span>
+  </a>
+  <nav class="nav-links" aria-label="Main">
+    <a href="#how">How it works</a>
+    <a href="#vehicles">Vehicle types</a>
+    <a href="#why">Why DriveMatch</a>
+  </nav>
+  <div class="nav-actions">
+    <span class="mode-pill" id="navModePill" title="Agent mode — powered by the DriveMatch backend (server.js)">Checking backend…</span>
+    <button class="btn btn-ghost" id="resumeBtn" hidden>Resume chat</button>
+    <button class="btn btn-primary btn-sm" data-start>Talk to Your Agent →</button>
+  </div>
+  <button class="hamburger" id="hamburger" aria-label="Menu" aria-expanded="false">☰</button>
+</header>
+
+<!-- HERO / LANDING -->
+<main>
+<section class="hero">
+  <div class="hero-bg" aria-hidden="true">
+    <div class="blob blob-1"></div><div class="blob blob-2"></div>
+    <div class="grid-lines"></div>
+  </div>
+
+  <div class="hero-inner">
+    <div class="hero-copy">
+      <div class="eyebrow"><span class="dot"></span> PERSONALIZED VEHICLE AGENT &nbsp;•&nbsp; CHAT ~3 MINUTES</div>
+      <h1>Find the vehicle<br/>that fits <em>your life</em>,<br/>not just a budget.</h1>
+      <p class="hero-sub">Chat with <strong>Maya, your DriveMatch agent</strong>. She'll get to know how you live, drive, and spend — then build your driver profile and the guidelines we'll use to select vehicles <strong>for you</strong>. No forms, just conversation.</p>
+
+      <div class="hero-ctas">
+        <button class="btn btn-primary btn-lg" data-start>Start Chatting With Your Agent →</button>
+        <a class="btn btn-outline btn-lg" href="#how">See how it works</a>
+      </div>
+
+      <div class="hero-stats">
+        <div><strong>7</strong><span>Topics Maya covers</span></div>
+        <div><strong>3 min</strong><span>Chat to profile</span></div>
+        <div><strong>100%</strong><span>Free &amp; unbiased</span></div>
+        <div><strong>0</strong><span>Forms to fill in</span></div>
+      </div>
+    </div>
+
+    <div class="hero-visual" aria-hidden="true">
+      <div class="car-card main-card">
+        <div class="car-card-top"><span class="pill pill-green">98% MATCH</span><span class="pill">SUV • HYBRID</span></div>
+        <div class="car-illustration">
+          <svg viewBox="0 0 320 130" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="SUV illustration">
+            <ellipse cx="160" cy="112" rx="130" ry="10" fill="#0f172a" opacity=".12"/>
+            <path d="M28 92 L44 58 Q48 48 62 46 L92 42 L118 22 Q124 16 136 16 L196 16 Q208 16 218 24 L244 44 L272 50 Q292 54 296 72 L298 92 Z" fill="#0ea5e9"/>
+            <path d="M100 42 L122 24 L158 24 L158 42 Z M168 24 L196 24 L214 42 L168 42 Z" fill="#082f49" opacity=".82"/>
+            <path d="M28 92 L298 92 L296 100 Q294 106 286 106 L38 106 Q28 106 28 92Z" fill="#0369a1"/>
+            <circle cx="84" cy="106" r="18" fill="#0f172a"/><circle cx="84" cy="106" r="8" fill="#e2e8f0"/>
+            <circle cx="238" cy="106" r="18" fill="#0f172a"/><circle cx="238" cy="106" r="8" fill="#e2e8f0"/>
+            <rect x="52" y="66" width="26" height="7" rx="3.5" fill="#fef08a"/>
+          </svg>
+        </div>
+        <h3>Your Top Match Awaits</h3>
+        <p>Family-ready, low running cost, top safety scores — based on <em>your</em> answers.</p>
+        <div class="match-bars">
+          <label>Safety <span>98</span></label><div class="bar"><i style="width:98%"></i></div>
+          <label>Running cost <span>94</span></label><div class="bar"><i style="width:94%"></i></div>
+          <label>Space &amp; comfort <span>91</span></label><div class="bar"><i style="width:91%"></i></div>
+        </div>
+      </div>
+
+      <div class="floating-card fc-1"><span>⛽</span><div><strong>Save ~$1,840/yr</strong><small>vs. average choice</small></div></div>
+      <div class="floating-card fc-2"><span>🛡️</span><div><strong>Top Safety Pick</strong><small>Only vetted picks</small></div></div>
+      <div class="floating-card fc-3"><span>✓</span><div><strong>Profile created</strong><small id="fcName">Welcome aboard!</small></div></div>
+    </div>
+  </div>
+</section>
+
+<!-- TRUST STRIP -->
+<section class="trust-strip" aria-label="Highlights">
+  <span>✓ No dealer spam</span><span>✓ Unbiased — we don't sell cars</span><span>✓ Total cost, not just price</span><span>✓ Save &amp; resume anytime</span><span>✓ Built for first-time &amp; seasoned buyers</span>
+</section>
+
+<!-- HOW IT WORKS -->
+<section class="section" id="how">
+  <div class="section-head">
+    <div class="eyebrow center">HOW IT WORKS</div>
+    <h2>Three steps to a confident purchase</h2>
+    <p>We start by getting to know you — because the “best car” depends entirely on who’s driving it.</p>
+  </div>
+  <div class="steps-grid">
+    <article class="step-card"><div class="step-num">01</div><div class="step-icon">💬</div><h3>Chat with your agent</h3><p>Maya guides you through a few natural questions about your household, commute, lifestyle, and budget — just type like you'd text a friend.</p><span class="step-tag">You are here</span></article>
+    <article class="step-card"><div class="step-num">02</div><div class="step-icon">🎯</div><h3>Profile &amp; guidelines</h3><p>As you talk, your driver profile builds live beside the chat and turns into clear guidelines for vehicle selection.</p><span class="step-tag muted">Built into the chat</span></article>
+    <article class="step-card"><div class="step-num">03</div><div class="step-icon">🚗</div><h3>Analyse &amp; compare</h3><p>Name any make and model in the chat — Maya pulls up owner sentiment, trims, colours, options, financing, and similar vehicles, and can turn that vehicle into an editable draft profile.</p><span class="step-tag">Live in the chat</span></article>
+  </div>
+</section>
+
+<!-- AGENT CHAT / GET TO KNOW YOU -->
+<section class="section onboarding-section" id="agent" hidden>
+  <div class="section-head">
+    <div class="eyebrow center">YOUR PERSONAL VEHICLE AGENT</div>
+    <h2 id="onboardingTitle">Let's talk — Maya will build your profile</h2>
+    <p>Just answer naturally, one message at a time. Say <strong>“skip”</strong> anytime — or name a vehicle you're interested in (e.g. <strong>“Analyse a Toyota RAV4”</strong>) for sentiment, trims, colours, options, financing and similar models. Maya can even draft your profile from that vehicle for you to edit together.</p>
+  </div>
+
+  <div class="agent-layout">
+    <!-- CHAT -->
+    <div class="chat-panel" aria-label="Chat with your DriveMatch agent">
+      <div class="chat-head">
+        <div class="agent-id">
+          <span class="agent-avatar" aria-hidden="true">M</span>
+          <div><strong id="agentName">Maya</strong><small>Your DriveMatch agent</small></div>
+        </div>
+        <span class="mode-pill" id="agentModePill">Local agent</span>
+        <button type="button" class="btn btn-ghost btn-sm" id="restartChatBtn">↺ Restart</button>
+      </div>
+
+      <ol class="topic-progress" id="topicProgress" aria-label="Topics covered"></ol>
+
+      <div class="chat-tools">
+        <button type="button" class="chip tool-chip" id="analyseVehicleBtn">🔎 Analyse a vehicle</button>
+        <button type="button" class="chip tool-chip" id="financeToolBtn" disabled>💰 Financing calculator</button>
+        <button type="button" class="chip tool-chip" id="vehicleProfileToolBtn" disabled>✨ Build my profile from this vehicle</button>
+      </div>
+
+      <div class="chat-messages" id="chatMessages" aria-live="polite" aria-label="Conversation"></div>
+
+      <div class="typing" id="typingIndicator" hidden><span></span><span></span><span></span> Maya is thinking…</div>
+
+      <div class="quick-replies" id="quickReplies" aria-label="Suggested replies"></div>
+
+      <form class="chat-form" id="chatForm">
+        <label class="sr-only" for="chatInput">Message Maya</label>
+        <textarea id="chatInput" rows="1" placeholder="Type your answer… (Enter to send, Shift+Enter for a new line)" autocomplete="off"></textarea>
+        <button type="submit" class="btn btn-primary" id="sendBtn">Send →</button>
+      </form>
+      <p class="chat-hint" id="agentHint">Checking whether the DriveMatch backend has Muse Wonder enabled…</p>
+    </div>
+
+    <!-- LIVE PROFILE + GUIDELINES -->
+    <aside class="profile-panel" aria-label="Your driver profile">
+      <div class="profile-head">
+        <h3>Your Driver Profile</h3>
+        <span class="save-note" id="saveNote" role="status"></span>
+      </div>
+      <div class="completeness"><div class="progress-track"><div class="progress-fill" id="profileProgress" style="width:0%"></div></div><small id="profileProgressLabel">0% complete — say hello to begin</small></div>
+
+      <div id="personaPanel"></div>
+      <div id="profilePanel"><p class="empty-state">Nothing here yet. As you chat, Maya will fill this in — your lifestyle, budget, must-haves, and priorities.</p></div>
+
+      <div id="vehiclePanel" hidden>
+        <div class="vehicle-panel-head">
+          <h3 id="vehiclePanelTitle">Vehicle Analysis</h3>
+          <span class="pill" id="vehicleDataBadge">Search-grounded</span>
+        </div>
+        <p class="data-note" id="vehicleDataNote"></p>
+        <div id="vehicleContent"></div>
+
+        <div class="finance-box" id="financeBox">
+          <h4>💰 Financing Calculator</h4>
+          <p class="guidelines-sub">Estimate only — not financial advice. Enter/adjust local pricing in your chosen currency; figures are not converted between currencies.</p>
+          <div class="finance-grid">
+            <label class="field"><span>Currency</span>
+              <select id="finCurrency">
+                <option value="USD">USD — US Dollar</option><option value="EUR">EUR — Euro</option><option value="GBP">GBP — British Pound</option>
+                <option value="ZAR">ZAR — South African Rand</option><option value="AUD">AUD — Australian Dollar</option><option value="CAD">CAD — Canadian Dollar</option>
+                <option value="NZD">NZD — New Zealand Dollar</option><option value="JPY">JPY — Japanese Yen</option><option value="CHF">CHF — Swiss Franc</option>
+                <option value="INR">INR — Indian Rupee</option><option value="AED">AED — UAE Dirham</option>
+              </select></label>
+            <label class="field"><span>Vehicle price</span><input type="number" id="finPrice" min="0" step="100" inputmode="decimal" /></label>
+            <label class="field"><span>Deposit / down payment</span><input type="number" id="finDeposit" min="0" step="100" value="0" inputmode="decimal" /></label>
+            <label class="field"><span>Trade-in value</span><input type="number" id="finTradeIn" min="0" step="100" value="0" inputmode="decimal" /></label>
+            <label class="field"><span>Fees / on-road costs</span><input type="number" id="finFees" min="0" step="50" value="0" inputmode="decimal" /></label>
+            <label class="field"><span>Term</span>
+              <select id="finTerm"><option value="12">12 months</option><option value="24">24 months</option><option value="36">36 months</option><option value="48">48 months</option><option value="60" selected>60 months</option><option value="72">72 months</option><option value="84">84 months</option></select></label>
+            <label class="field full"><span>Interest rate (APR): <strong id="finAprOut">7.5%</strong></span><input type="range" id="finApr" min="0" max="25" step="0.1" value="7.5" /></label>
+          </div>
+          <div class="finance-results" id="finResults" aria-live="polite"></div>
+        </div>
+      </div>
+
+      <div id="guidelinesPanel" hidden>
+        <h3 class="guidelines-title">🧭 Guidelines for Your Vehicle Selection</h3>
+        <p class="guidelines-sub">This is the rulebook we'll use when we pick and rank vehicles for you.</p>
+        <div id="guidelinesContent"></div>
+      </div>
+
+      <div class="summary-actions">
+        <button type="button" class="btn btn-primary btn-sm" id="guidelinesBtn">✨ Generate My Guidelines</button>
+        <button type="button" class="btn btn-outline btn-sm" id="downloadBtn">⬇ Download profile (.json)</button>
+        <button type="button" class="btn btn-ghost btn-sm" id="restartBtn2">Start over</button>
+      </div>
+    </aside>
+  </div>
+</section>
+
+<!-- VEHICLE TYPES -->
+<section class="section alt" id="vehicles">
+  <div class="section-head"><div class="eyebrow center">EXPLORE</div><h2>Every lifestyle has a shape</h2><p>Not sure where you fit? Tell Maya — she'll place you. Clicking one of these tells her what you're eyeing.</p></div>
+  <div class="vehicle-grid">
+    <article class="vehicle-card"><span>🚗</span><h3>Sedan</h3><p>Efficient, comfortable, great value for commuters.</p><button class="link-btn" data-start data-prefill="Sedan">This could be me →</button></article>
+    <article class="vehicle-card"><span>🚙</span><h3>SUV / Crossover</h3><p>Space, visibility and all-weather confidence.</p><button class="link-btn" data-start data-prefill="SUV / Crossover">This could be me →</button></article>
+    <article class="vehicle-card"><span>🛻</span><h3>Truck / Pickup</h3><p>Built to haul, tow, and work as hard as you do.</p><button class="link-btn" data-start data-prefill="Truck / Pickup">This could be me →</button></article>
+    <article class="vehicle-card"><span>⚡</span><h3>Electric (EV)</h3><p>Low running costs, instant torque, home charging.</p><button class="link-btn" data-start data-prefill-fuel="Electric (EV)">This could be me →</button></article>
+    <article class="vehicle-card"><span>🚐</span><h3>Minivan</h3><p>Unbeatable people-and-cargo flexibility for families.</p><button class="link-btn" data-start data-prefill="Minivan">This could be me →</button></article>
+    <article class="vehicle-card"><span>🚘</span><h3>Hatchback</h3><p>City-friendly size with surprising cargo space.</p><button class="link-btn" data-start data-prefill="Hatchback">This could be me →</button></article>
+  </div>
+</section>
+
+<!-- WHY -->
+<section class="section" id="why">
+  <div class="section-head"><div class="eyebrow center">WHY DRIVEMATCH</div><h2>Built around you, not inventory</h2></div>
+  <div class="why-grid">
+    <div class="why-card"><span>🎯</span><h3>Truly personalised</h3><p>Your commute, passengers, terrain, and priorities — not just a price filter.</p></div>
+    <div class="why-card"><span>💸</span><h3>Total cost clarity</h3><p>Fuel, insurance, maintenance and depreciation explained before you buy.</p></div>
+    <div class="why-card"><span>🤝</span><h3>No pressure, no spam</h3><p>We don't sell cars or your data. Take your profile to any dealer, or none.</p></div>
+    <div class="why-card"><span>🧭</span><h3>Plain-English trade-offs</h3><p>Every recommendation explains <em>why</em> it fits and what you'd give up.</p></div>
+  </div>
+
+  <div class="cta-banner">
+    <div><h2>Ready to meet your match?</h2><p>Start with a 3-minute chat about you. Vehicles come later — and they'll actually fit.</p></div>
+    <button class="btn btn-white btn-lg" data-start>Chat With Your Agent →</button>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="footer-inner">
+    <a href="#" class="logo light">◈ Drive<span>Match</span></a>
+    <p>DriveMatch is a demo experience built incrementally. Your chat and profile are stored only in your browser (localStorage). Chat messages are processed by the DriveMatch backend; the Muse Wonder API token lives only on the server.</p>
+    <nav><a href="#how">How it works</a><a href="#vehicles">Vehicle types</a><a href="#agent" data-start>Chat with Maya</a></nav>
+    <small>© 2026 DriveMatch — Hackathon build v0.4 (Vehicle Analysis)</small>
+  </div>
+</footer>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script src="app.js"></script>
+</body>
+</html>
