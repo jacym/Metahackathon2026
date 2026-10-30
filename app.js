@@ -1,11 +1,68 @@
 // DriveMatch v0.3 — Agentic chat via the DriveMatch backend (server.js)
 // The browser NEVER sees the LLM token: it only calls POST /api/agent on
-// our own server, which holds the Muse Wonder key in its .env file.
+// our own server, which holds the Muse API key in its .env file.
 // If the backend is unreachable or has no key configured, the built-in
 // local agent below runs the same conversation on-device.
 const AGENT_NAME = 'Maya';
 const STORAGE_KEY = 'drivematch_agent_v2';
 const backend = { checked: false, live: false, providerModel: 'meta/muse-wonder-1.0', agentName: AGENT_NAME };
+// Country/currency are inferred from the conversation, not assumed.
+// This is a starter map for common markets; any other ISO country code
+// still works (region name via Intl, currency chosen in the calculator).
+const COUNTRY_INFO = {
+  US: { country: 'United States', currency: 'USD', postalLabel: 'ZIP code' },
+  CA: { country: 'Canada', currency: 'CAD', postalLabel: 'postal code' },
+  GB: { country: 'United Kingdom', currency: 'GBP', postalLabel: 'postcode' },
+  AU: { country: 'Australia', currency: 'AUD', postalLabel: 'postcode' },
+  NZ: { country: 'New Zealand', currency: 'NZD', postalLabel: 'postcode' },
+  ZA: { country: 'South Africa', currency: 'ZAR', postalLabel: 'postal code' },
+  DE: { country: 'Germany', currency: 'EUR', postalLabel: 'postal code' },
+  FR: { country: 'France', currency: 'EUR', postalLabel: 'postal code' },
+  ES: { country: 'Spain', currency: 'EUR', postalLabel: 'postal code' },
+  IT: { country: 'Italy', currency: 'EUR', postalLabel: 'postal code' },
+  NL: { country: 'Netherlands', currency: 'EUR', postalLabel: 'postcode' },
+  IE: { country: 'Ireland', currency: 'EUR', postalLabel: 'Eircode' },
+  CH: { country: 'Switzerland', currency: 'CHF', postalLabel: 'postal code' },
+  JP: { country: 'Japan', currency: 'JPY', postalLabel: 'postal code' },
+  IN: { country: 'India', currency: 'INR', postalLabel: 'PIN code' },
+  AE: { country: 'United Arab Emirates', currency: 'AED', postalLabel: 'postal code' },
+  SG: { country: 'Singapore', currency: 'SGD', postalLabel: 'postal code' },
+  BR: { country: 'Brazil', currency: 'BRL', postalLabel: 'CEP' },
+  MX: { country: 'Mexico', currency: 'MXN', postalLabel: 'postal code' },
+  KR: { country: 'South Korea', currency: 'KRW', postalLabel: 'postal code' },
+  SE: { country: 'Sweden', currency: 'SEK', postalLabel: 'postal code' },
+  NO: { country: 'Norway', currency: 'NOK', postalLabel: 'postal code' },
+  DK: { country: 'Denmark', currency: 'DKK', postalLabel: 'postal code' },
+  PL: { country: 'Poland', currency: 'PLN', postalLabel: 'postal code' },
+};
+function localeCountryCode() {
+  try {
+    const locale = Intl.DateTimeFormat().resolvedOptions().locale || '';
+    const region = locale.split('-').pop();
+    return /^[A-Z]{2}$/.test(region) && COUNTRY_INFO[region] ? region : '';
+  } catch { return ''; }
+}
+let selectedMarketCode = localeCountryCode();
+let selectedCurrency = selectedMarketCode ? COUNTRY_INFO[selectedMarketCode].currency : '';
+let marketSource = selectedMarketCode ? 'locale' : 'default'; // locale | default | chat | manual
+let awaitingMarketClarification = false;
+const marketCacheInfo = {}; // code -> stats from /api/vehicle-cache/ensure
+function countryNameFor(code) {
+  if (!code) return 'your country';
+  if (COUNTRY_INFO[code]?.country) return COUNTRY_INFO[code].country;
+  try { return new Intl.DisplayNames(['en'], { type: 'region' }).of(code) || code; } catch { return code; }
+}
+function currentMarket() {
+  const code = selectedMarketCode || '';
+  const info = COUNTRY_INFO[code] || {};
+  return {
+    code,
+    country: code ? countryNameFor(code) : 'your country',
+    currency: selectedCurrency || info.currency || 'USD',
+    postalLabel: info.postalLabel || 'postal code',
+  };
+}
+function currentCurrency() { return currentMarket().currency; }
 
 const $ = (s, c = document) => c.querySelector(s);
 const $$ = (s, c = document) => [...c.querySelectorAll(s)];
@@ -15,7 +72,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 function llmIsConfigured() { return backend.live; }
 function agentModeLabel() {
   if (!backend.checked) return 'Checking backend…';
-  if (backend.live) return 'Muse Wonder · Live (via backend)';
+  if (backend.live) return backend.models?.routing ? `Muse ${backend.models.routing === 'balanced' ? 'Wonder + Spark' : backend.models.routing} · Live (via backend)` : 'Muse · Live (via backend)';
   return 'Local agent · Backend has no LLM key';
 }
 async function checkBackend() {
@@ -25,6 +82,7 @@ async function checkBackend() {
     const data = await res.json();
     backend.live = data.mode === 'live';
     backend.providerModel = data.providerModel || backend.providerModel;
+    backend.models = data.models || null;
     backend.agentName = data.agentName || AGENT_NAME;
   } catch { backend.live = false; /* opened via file:// or server down -> local agent */ }
   backend.checked = true;
@@ -50,6 +108,7 @@ function emptyProfile() {
     budget: '', monthly: '', payment: '', keepYears: '', tradeIn: '', timeline: '',
     priorities: {}, prioritiesMentioned: [], notes: '',
     interestedVehicle: '', sourceVehicle: '',
+    country: '', countryCode: '', postalCode: '',
   };
 }
 let profile = emptyProfile();
@@ -62,11 +121,16 @@ let busy = false;
 let customQuickReplies = null;
 let currentVehicleAnalysis = null;
 let pendingVehicleQuery = false;
+let currentSuggestions = null;
+let dealerResults = {}; // "Make Model" -> dealer-offers response
+let pendingDealerVehicle = '';
+let profileConfirmed = false;
+let awaitingConfirmation = false;
 
 const TOPICS = [
   {
     id: 'intro', label: 'About you',
-    prompt: () => `Hey there! I'm ${AGENT_NAME}, your DriveMatch agent 👋\n\nI won't make you fill in a form — we'll just chat, and I'll build your driver profile as we go. It takes about 3 minutes, and at the end I'll turn what I learn into guidelines for picking your vehicle.\n\nAlready eyeing something? Just say "Analyse a Toyota RAV4" (or tap 🔎 Analyse a vehicle) and I'll get its sentiment, trims, colours, options, financing and similar models — and I can draft your profile from it.\n\nFirst up: what's your first name, and where do you live? (City or ZIP is fine.)`,
+    prompt: () => `Hey there! I'm ${AGENT_NAME}, your DriveMatch agent 👋\n\nI won't make you fill in a form — we'll just chat, and I'll build your driver profile as we go. It takes about 3 minutes, and at the end I'll turn what I learn into guidelines for picking your vehicle.\n\nAlready eyeing something? Just say "Analyse a Toyota RAV4" (or tap 🔎 Analyse a vehicle) and I'll get its sentiment, trims, colours, options, financing and similar models — and I can draft your profile from it.\n\nFirst up: what's your first name, and where do you live? A city plus your postal code — or just your country — is fine: I'll set your market and local currency from what you tell me.`,
     quick: [],
   },
   {
@@ -104,11 +168,25 @@ const TOPICS = [
 // The agent system prompt now lives server-side in server.js (AGENT_SYSTEM_PROMPT).
 
 // ---------------- Init ----------------
+function populateFinanceCurrencies() {
+  const select = $('#finCurrency'); if (!select) return;
+  const codes = [...new Set([...CURRENCIES, selectedCurrency].filter(Boolean))];
+  select.innerHTML = codes.map((code) => {
+    let name = code;
+    try { name = `${code} — ${new Intl.DisplayNames(['en'], { type: 'currency' }).of(code)}`; } catch { /* keep code */ }
+    return `<option value="${code}">${escapeHtml(name)}</option>`;
+  }).join('');
+  if (selectedCurrency) select.value = selectedCurrency;
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   $('#agentName').textContent = AGENT_NAME;
+  populateFinanceCurrencies();
+  populateMarketSelect();
   updateModePills();
   checkBackend();
   loadSaved();
+  setMarket(profile.countryCode || selectedMarketCode, { updateFinance: false });
   renderTopicProgress();
   renderProfilePanel();
 
@@ -126,6 +204,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitInput(); }
   });
   $('#chatInput').addEventListener('input', autoGrow);
+  $('#marketSelect').addEventListener('change', (e) => setMarket(e.target.value, { announce: true, source: 'manual' }));
   $('#restartChatBtn').addEventListener('click', confirmRestart);
   $('#restartBtn2').addEventListener('click', confirmRestart);
   $('#analyseVehicleBtn').addEventListener('click', () => {
@@ -148,7 +227,17 @@ document.addEventListener('DOMContentLoaded', () => {
   ['finCurrency', 'finPrice', 'finDeposit', 'finTradeIn', 'finFees', 'finTerm', 'finApr'].forEach((id) => {
     document.getElementById(id)?.addEventListener('input', renderFinanceResults);
   });
+  $('#suggestBtn').addEventListener('click', () => { if (!started) startAgent(); runVehicleSuggestions(); });
+  $('#suggestionsContent').addEventListener('click', (e) => {
+    const analyseBtn = e.target.closest('[data-suggest-analyse]');
+    const dealerBtn = e.target.closest('[data-suggest-dealers]');
+    if (analyseBtn) { addMessage('user', `Analyse a ${analyseBtn.dataset.suggestAnalyse}`); runVehicleAnalysis(analyseBtn.dataset.suggestAnalyse); }
+    if (dealerBtn) runDealerOffers(dealerBtn.dataset.suggestDealers);
+  });
   $('#downloadBtn').addEventListener('click', downloadProfile);
+  $('#pdfBtn').addEventListener('click', () => { downloadGuidelinesPdf(); showToast('Choose "Save as PDF" in the print dialog to save your guidelines.'); });
+  $$('[data-upload-guidelines]').forEach((btn) => btn.addEventListener('click', () => $('#guidelinesUpload').click()));
+  $('#guidelinesUpload').addEventListener('change', (e) => handleGuidelinesUpload(e.target.files?.[0]));
   $('#guidelinesBtn').addEventListener('click', () => {
     guidelines = buildGuidelines(profile);
     renderProfilePanel();
@@ -156,6 +245,122 @@ document.addEventListener('DOMContentLoaded', () => {
     save();
   });
 });
+
+function populateMarketSelect() {
+  const select = $('#marketSelect'); if (!select) return;
+  const current = select.value || selectedMarketCode;
+  select.innerHTML = '<option value="">Auto-detect from chat</option>' + Object.entries(COUNTRY_INFO)
+    .map(([code, info]) => '<option value="' + code + '">' + info.country + '</option>').join('');
+  if (selectedMarketCode && !COUNTRY_INFO[selectedMarketCode]) {
+    const opt = document.createElement('option'); opt.value = selectedMarketCode; opt.textContent = countryNameFor(selectedMarketCode); select.appendChild(opt);
+  }
+  select.value = current && (current === '' || COUNTRY_INFO[current] || current === selectedMarketCode) ? selectedMarketCode : '';
+}
+
+function setMarket(code, { announce = false, updateFinance = true, source, currency } = {}) {
+  const previousCode = selectedMarketCode;
+  selectedMarketCode = code ? String(code).toUpperCase() : '';
+  if (source) marketSource = source;
+  if (currency) selectedCurrency = currency;
+  else if (selectedMarketCode && COUNTRY_INFO[selectedMarketCode]) selectedCurrency = COUNTRY_INFO[selectedMarketCode].currency;
+  const market = currentMarket();
+  profile.country = selectedMarketCode ? market.country : '';
+  profile.countryCode = selectedMarketCode;
+  // A postal code from a different country is stale after a switch.
+  if (previousCode && previousCode !== selectedMarketCode) profile.postalCode = '';
+  populateMarketSelect();
+  renderMarketHint();
+  const finCurrency = $('#finCurrency');
+  if (finCurrency && updateFinance && market.currency) { finCurrency.value = market.currency; renderFinanceResults(); }
+  if (selectedMarketCode) ensureMarketCache(selectedMarketCode);
+  if (announce && started && selectedMarketCode) {
+    addMessage('agent', 'Switched to ' + market.country + ' — I’ll use your local ' + market.postalLabel + ' and price vehicles in your local currency, with ' + market.country + ' trims and pricing. If I already analysed a vehicle, ask me to analyse it again so I pull the ' + market.country + ' version.');
+  }
+  save();
+}
+function renderMarketHint() {
+  const hint = $('#marketHint'); if (!hint) return;
+  const market = currentMarket();
+  const sourceText = marketSource === 'chat' ? 'Auto-detected from your chat' : marketSource === 'manual' ? 'Set manually' : marketSource === 'locale' ? 'Suggested by your device locale — not confirmed yet' : 'Not confirmed yet — Maya will detect it from your chat';
+  const cache = market.code ? marketCacheInfo[market.code] : null;
+  const cacheText = cache ? ' · Cache: ' + cache.dbFile + ' (' + cache.entries + ' vehicle' + (cache.entries === 1 ? '' : 's') + ' cached)' : '';
+  hint.textContent = market.code
+    ? sourceText + ': ' + market.country + ' — local ' + market.postalLabel + ', vehicles priced in your local currency' + cacheText + '. You can override this anytime.'
+    : sourceText + '. Tell Maya your country, city or postal code and she will set your market and local currency automatically.';
+}
+async function ensureMarketCache(code) {
+  try {
+    const res = await fetch('/api/vehicle-cache/ensure', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ market: code }) });
+    if (!res.ok) return;
+    marketCacheInfo[code] = await res.json();
+    if (selectedMarketCode === code) renderMarketHint();
+  } catch { /* backend offline / file:// — market still works locally */ }
+}
+
+const COUNTRY_SIGNALS = [
+  { code: 'CA', names: ['canada', 'canadian'], places: ['ontario', 'quebec', 'québec', 'british columbia', 'alberta', 'manitoba', 'saskatchewan', 'nova scotia', 'new brunswick', 'newfoundland', 'prince edward island', 'toronto', 'vancouver', 'montreal', 'montréal', 'calgary', 'ottawa', 'edmonton', 'winnipeg', 'halifax'] },
+  { code: 'US', names: ['united states', 'usa', 'america', 'american'], places: ['california', 'texas', 'florida', 'illinois', 'arizona', 'colorado', 'oregon', 'nevada', 'georgia', 'ohio', 'pennsylvania', 'michigan', 'new york city', 'los angeles', 'chicago', 'houston', 'phoenix', 'san diego', 'san francisco', 'seattle', 'denver', 'austin', 'dallas', 'miami'] },
+  { code: 'GB', names: ['united kingdom', 'britain', 'british', 'england', 'scotland', 'wales'], places: ['london', 'manchester', 'birmingham', 'glasgow', 'edinburgh', 'liverpool', 'leeds', 'bristol', 'sheffield'] },
+  { code: 'AU', names: ['australia', 'australian'], places: ['sydney', 'melbourne', 'brisbane', 'perth', 'adelaide', 'canberra', 'hobart', 'darwin'] },
+  { code: 'NZ', names: ['new zealand'], places: ['auckland', 'wellington', 'christchurch', 'hamilton', 'dunedin'] },
+  { code: 'ZA', names: ['south africa', 'south african'], places: ['johannesburg', 'cape town', 'durban', 'pretoria', 'sandton', 'gqeberha', 'bloemfontein'] },
+  { code: 'DE', names: ['germany', 'german', 'deutschland'], places: ['berlin', 'munich', 'hamburg', 'cologne', 'frankfurt', 'stuttgart', 'düsseldorf'] },
+  { code: 'FR', names: ['france', 'french'], places: ['paris', 'lyon', 'marseille', 'toulouse', 'bordeaux', 'nantes'] },
+  { code: 'IN', names: ['india', 'indian'], places: ['mumbai', 'delhi', 'bengaluru', 'bangalore', 'chennai', 'hyderabad', 'pune', 'kolkata', 'ahmedabad'] },
+  { code: 'JP', names: ['japan', 'japanese'], places: ['tokyo', 'osaka', 'kyoto', 'nagoya', 'fukuoka', 'sapporo'] },
+  { code: 'AE', names: ['united arab emirates', 'uae', 'emirates'], places: ['dubai', 'abu dhabi', 'sharjah'] },
+  { code: 'SG', names: ['singapore'], places: ['singapore'] },
+  { code: 'BR', names: ['brazil', 'brasil', 'brazilian'], places: ['são paulo', 'rio de janeiro', 'brasília', 'belo horizonte'] },
+  { code: 'MX', names: ['mexico', 'mexican'], places: ['mexico city', 'guadalajara', 'monterrey', 'puebla'] },
+];
+const CURRENCY_COUNTRY = { USD: 'US', CAD: 'CA', GBP: 'GB', AUD: 'AU', NZD: 'NZ', ZAR: 'ZA', JPY: 'JP', INR: 'IN', AED: 'AE', SGD: 'SG', BRL: 'BR', MXN: 'MX', KRW: 'KR', CHF: 'CH', SEK: 'SE', NOK: 'NO', DKK: 'DK', PLN: 'PL' };
+
+// Infer the user's market from what they actually say: country/place
+// names, postal-code formats, and currencies. Returns
+// { changed, code, reasons, currencyChanged } — only switches country on
+// confident residence-style signals, and never overrides a manual
+// selection on weak/incidental mentions.
+function detectMarketFromText(text) {
+  const raw = String(text || '');
+  const lower = ' ' + raw.toLowerCase() + ' ';
+  const scores = new Map(); const reasons = [];
+  const add = (code, points, reason) => { if (!code) return; scores.set(code, (scores.get(code) || 0) + points); if (reason && !reasons.includes(reason)) reasons.push(reason); };
+  const residenceContext = /\b(live|living|from|based|located|my (?:address|postal|zip|postcode)|i'?m in|moved to)\b/i.test(raw) || TOPICS[topicIndex]?.id === 'intro';
+
+  if (/\b[A-Za-z]\d[A-Za-z][ -]?\d[A-Za-z]\d\b/.test(raw)) add('CA', 6, 'Canadian postal code');
+  if (/\b[A-Za-z]{1,2}\d[A-Za-z\d]?\s*\d[A-Za-z]{2}\b/.test(raw) && !/\b[A-Za-z]\d[A-Za-z][ -]?\d[A-Za-z]\d\b/.test(raw)) add('GB', 5, 'UK postcode');
+  if (/\bpostal code\b/i.test(raw)) reasons.push('postal code mentioned');
+  for (const sig of COUNTRY_SIGNALS) {
+    if (sig.names.some((n) => lower.includes(' ' + n + ' ') || lower.includes(' ' + n + ','))) add(sig.code, 5, countryNameFor(sig.code));
+    else if (sig.places.some((p) => lower.includes(p))) add(sig.code, 3, countryNameFor(sig.code));
+  }
+  if (/\b\d{5}(?:-\d{4})?\b/.test(raw) && (residenceContext || /\bzip\b/i.test(raw))) add('US', 5, 'ZIP code');
+
+  let currencyChanged = false;
+  const currencyMention = raw.match(/\b(USD|CAD|GBP|EUR|ZAR|AUD|NZD|JPY|CHF|INR|AED|SGD|BRL|MXN|KRW|SEK|NOK|DKK|PLN)\b/i);
+  if (currencyMention) {
+    const cur = currencyMention[1].toUpperCase();
+    if (cur !== selectedCurrency) { selectedCurrency = cur; currencyChanged = true; const fc = $('#finCurrency'); if (fc) { fc.value = cur; renderFinanceResults(); } }
+    if (CURRENCY_COUNTRY[cur]) add(CURRENCY_COUNTRY[cur], 4, 'local currency');
+  }
+  if (/£/.test(raw)) { add('GB', 3, 'pounds sterling'); if (selectedCurrency !== 'GBP') { selectedCurrency = 'GBP'; currencyChanged = true; } }
+  if (/₹|\brupees?\b/i.test(raw)) { add('IN', 3, 'rupees'); if (selectedCurrency !== 'INR') { selectedCurrency = 'INR'; currencyChanged = true; } }
+  if (/\brand\b/i.test(raw)) { add('ZA', 2, 'rand'); if (selectedCurrency !== 'ZAR') { selectedCurrency = 'ZAR'; currencyChanged = true; } }
+  if (residenceContext && scores.size) { const top = [...scores.entries()].sort((a, b) => b[1] - a[1])[0]; if (top) scores.set(top[0], top[1] + 1); }
+
+  const ranked = [...scores.entries()].sort((a, b) => b[1] - a[1]);
+  const [winner, winnerScore] = ranked[0] || [null, 0];
+  const runnerUp = ranked[1]?.[1] || 0;
+  const explicit = ranked.length && (winnerScore >= 5 || (residenceContext && winnerScore >= 4));
+  if (!winner || winnerScore < 3 || winnerScore - runnerUp < 2) return { changed: false, code: selectedMarketCode, reasons, currencyChanged };
+  if (winner === selectedMarketCode) {
+    if (marketSource === 'default' || marketSource === 'locale') marketSource = 'chat';
+    return { changed: false, code: winner, reasons, currencyChanged };
+  }
+  if (marketSource === 'manual' && !explicit) return { changed: false, code: selectedMarketCode, reasons, currencyChanged };
+  setMarket(winner, { source: 'chat' });
+  return { changed: true, code: winner, reasons, currencyChanged };
+}
 
 function updateModePills() {
   const label = agentModeLabel();
@@ -165,7 +370,7 @@ function updateModePills() {
     el.textContent = label; el.classList.toggle('live', live); el.classList.toggle('local', !live);
   });
   $('#agentHint').innerHTML = live
-    ? `Connected via the DriveMatch backend to <strong>Muse Wonder</strong> (${escapeHtml(backend.providerModel)}). The API token stays on the server — it is never sent to your browser.`
+    ? `Connected via the DriveMatch backend to <strong>Muse</strong> (${escapeHtml(backend.models?.profiles?.map((p) => p.label).join(' + ') || backend.providerModel)}${backend.models?.routing ? `, routing: ${escapeHtml(backend.models.routing)}` : ''}). Deep research and everyday chat can use different models; the API token stays on the server.`
     : `Running on the built-in local agent. To go live, the server operator adds the Muse Wonder token to the server's <code>.env</code> file (see README) — no key ever belongs in the browser.`;
 }
 
@@ -210,7 +415,10 @@ function renderConversation() {
 }
 function renderQuickReplies(list) {
   const el = $('#quickReplies');
-  const items = list || customQuickReplies || (isComplete ? ['That looks right', 'Actually, let me change something', 'Show my guidelines'] : TOPICS[topicIndex]?.quick || []);
+  const items = list || customQuickReplies
+    || (awaitingConfirmation ? ['✅ Confirm my profile', '✏️ Edit something', 'Show my guidelines']
+      : profileConfirmed ? ['🚗 Suggest vehicles for me', '⬇ Download guidelines (PDF)', '⬇ Download guidelines (JSON)', '✏️ Edit my profile']
+      : isComplete ? ['✅ Confirm my profile', '✏️ Edit something', 'Show my guidelines'] : TOPICS[topicIndex]?.quick || []);
   customQuickReplies = null;
   el.innerHTML = '';
   items.forEach((q) => {
@@ -243,8 +451,43 @@ async function submitInput() {
   addMessage('user', text);
   busy = true; setTyping(true);
   try {
-    const vehicleHandled = await handleVehicleFlow(text);
-    if (!vehicleHandled) {
+    // Market first: what the user just said may switch their country
+    // (and local currency + create that market's cache) before anything
+    // else — including a vehicle analysis in the same message — runs.
+    const detected = detectMarketFromText(text);
+    if (detected.changed) {
+      const m = currentMarket();
+      addMessage('agent', `I noticed you're in ${m.country} (${detected.reasons.slice(0, 2).join(', ')}) — I've set your market to ${m.country}: local ${m.postalLabel}, and pricing in your local currency. Your ${m.country} vehicle cache is ready on the backend too. Just say the word if I've got that wrong.`);
+    } else if (detected.currencyChanged) {
+      addMessage('agent', `Noted — I'll use your chosen currency in the financing calculator from here.`);
+    }
+
+    let handled = false;
+    if (awaitingMarketClarification) {
+      awaitingMarketClarification = false;
+      if (detected.code && (detected.changed || marketSource === 'chat') || /^[A-Za-z][A-Za-z .'-]{2,40}$/.test(text.trim())) {
+        // A country-name-only answer lands here; detection may already
+        // have set it. If not, leave the market unset rather than guess.
+        addMessage('agent', `Perfect — ${currentMarket().code ? `${currentMarket().country} it is` : 'thanks, I’ll keep detecting your market as we chat'}. Now, ${TOPICS[1].prompt()}`);
+        handled = true;
+      }
+    }
+    if (!handled && pendingDealerVehicle) {
+      const vehicle = pendingDealerVehicle; pendingDealerVehicle = '';
+      if (!/^(cancel|never ?mind|skip)$/i.test(text.trim())) {
+        if (!profile.location && text.trim().length <= 80) profile.location = text.trim();
+        extractFromText(text, 'intro');
+        await runDealerOffers(vehicle);
+        handled = true;
+      }
+    }
+    if (!handled && isComplete) handled = handleConfirmationFlow(text);
+    if (!handled && /\b(suggest|recommend|which|what)\b.*\b(vehicle|car|matches|buy)\b|\bvehicles for me\b|\bfind my matches\b/i.test(text) && !/\bsimilar\b/i.test(text)) {
+      await runVehicleSuggestions();
+      handled = true;
+    }
+    if (!handled) handled = await handleVehicleFlow(text);
+    if (!handled) {
       if (llmIsConfigured()) await handleWithLLM(text);
       else { await sleep(550); handleLocally(text); }
     }
@@ -256,6 +499,128 @@ async function submitInput() {
     renderTopicProgress(); renderProfilePanel(); renderQuickReplies(); save();
     $('#chatInput')?.focus({ preventScroll: true });
   }
+}
+
+// ---------------- Profile-based suggestions + dealers ----------------
+function dealerLocationText() {
+  return [profile.location, profile.postalCode, profile.country].filter(Boolean).join(', ');
+}
+async function runVehicleSuggestions() {
+  if (profileCompleteness(profile) < 30 && !profile.interestedVehicle) {
+    addMessage('agent', "I'd love to — but I need a little more of your profile first so the suggestions actually fit you. Tell me roughly: what you'll mainly use the vehicle for, your budget ballpark, and anything it must have. Or name a vehicle you like and I'll draft your profile from it.");
+    if (!conversation.length) startAgent();
+    return null;
+  }
+  const ownBusy = !busy;
+  if (ownBusy) { busy = true; setTyping(true); }
+  try {
+    const res = await fetch('/api/vehicle-suggestions', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ profile, guidelines, market: currentMarket().code, currency: currentCurrency() }),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !Array.isArray(data?.candidates)) throw new Error(data?.error || `Suggestions unavailable (HTTP ${res.status})`);
+    currentSuggestions = data;
+    renderSuggestions();
+    addMessage('agent', suggestionsSummaryText(data));
+    customQuickReplies = data.candidates.slice(0, 3).map((c) => `Analyse a ${c.make} ${c.model}`);
+    save();
+    $('#suggestionsPanel')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    return data;
+  } catch (err) {
+    console.warn('Vehicle suggestions failed:', err);
+    addMessage('system', `I could not generate suggestions just now (${err.message || 'unknown error'}). Suggestions need the backend running via npm start with an LLM configured — your profile is saved, so we can retry anytime.`);
+    return null;
+  } finally {
+    if (ownBusy) { busy = false; setTyping(false); renderTopicProgress(); renderProfilePanel(); }
+  }
+}
+function suggestionsSummaryText(d) {
+  return `Based on your profile, here are your 3 most likely matches 🎯\n\n${d.candidates.map((c, i) => `${i + 1}. ${c.make} ${c.model} — ${c.matchScore}% match. ${c.whySummary}`).join('\n\n')}\n\nThey're in the panel beside this chat with prices and sources. Tap Analyse on any of them for the full sentiment/trims/financing breakdown, or ask me for nearby dealers and offers.`;
+}
+function renderSuggestions() {
+  const d = currentSuggestions;
+  const panel = $('#suggestionsPanel');
+  if (!d?.candidates?.length) { panel.hidden = true; return; }
+  panel.hidden = false;
+  $('#suggestionsBadge').textContent = `Profile-based · ${d.asOf || ''}`;
+  $('#suggestionsNote').textContent = d.dataSource;
+  $('#suggestionsContent').innerHTML = d.candidates.map((c, i) => {
+    const name = `${c.make} ${c.model}`;
+    const dealerData = dealerResults[name];
+    return `
+    <article class="match-card ${i === 0 ? 'top' : ''}">
+      <div class="match-head">
+        <div><span class="match-rank">#${i + 1} match</span><h4>${escapeHtml(name)}${c.year ? ` <small>(${escapeHtml(c.year)})</small>` : ''}</h4>
+        <span class="pill">${escapeHtml(c.category || c.bodyStyle)}</span> <span class="pill">${escapeHtml(c.fuel)}</span> <span class="pill">${c.seating} seats</span></div>
+        <div class="match-score"><strong>${c.matchScore}%</strong><small>match</small></div>
+      </div>
+      ${c.priceGuide?.starting ? `<p><strong>Indicative from:</strong> ${formatMoney(c.priceGuide.starting, c.priceGuide.currency || currentCurrency())}${c.priceGuide.typicalTop ? ` – ${formatMoney(c.priceGuide.typicalTop, c.priceGuide.currency || currentCurrency())}` : ''} <small>(${escapeHtml(c.priceGuide.currency || currentCurrency())}, grounded — verify locally)</small></p>` : '<p><small>No reliable grounded starting price found — the full analysis will dig deeper.</small></p>'}
+      <p class="match-why">${escapeHtml(c.whySummary)}</p>
+      ${c.reasons?.length ? `<ul class="match-reasons">${c.reasons.map((r) => `<li>${escapeHtml(r)}</li>`).join('')}</ul>` : ''}
+      ${c.tradeoffs?.length ? `<p class="match-tradeoff">⚖️ Trade-off: ${escapeHtml(c.tradeoffs[0])}</p>` : ''}
+      <div class="summary-actions">
+        <button type="button" class="btn btn-primary btn-sm" data-suggest-analyse="${escapeHtml(name)}">🔎 Analyse this vehicle</button>
+        <button type="button" class="btn btn-outline btn-sm" data-suggest-dealers="${escapeHtml(name)}">📍 Nearby dealers &amp; offers</button>
+      </div>
+      <div class="dealer-box" id="dealers-${escapeHtml(name.replace(/\W+/g, '-'))}">${dealerData ? dealerHtml(dealerData) : ''}</div>
+    </article>`;
+  }).join('') + (d.sources?.length ? `<p><small>Sources: ${d.sources.slice(0, 6).map((s) => `<a href="${escapeHtml(s.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(s.domain)}</a>`).join(' · ')}${d.sources.length > 6 ? ` · +${d.sources.length - 6} more in the downloaded profile` : ''}</small></p>` : '');
+}
+function dealerHtml(d) {
+  const flex = d.flexibility || {};
+  return `
+    <h5>📍 Dealers &amp; offers near ${escapeHtml(d.location)} <small style="color:var(--muted)">(found ${escapeHtml(d.asOf)})</small></h5>
+    <p><small>${escapeHtml(d.dataSource)}</small></p>
+    ${d.dealers?.length ? d.dealers.map((dealer) => `
+      <div class="dealer-card"><h5>${escapeHtml(dealer.name)}</h5>
+        ${dealer.area || dealer.distanceText ? `<p>📍 ${escapeHtml([dealer.area, dealer.distanceText].filter(Boolean).join(' · '))}</p>` : ''}
+        ${dealer.offerTitle ? `<p><strong>Offer:</strong> ${escapeHtml(dealer.offerTitle)}${dealer.priceText ? ` — ${escapeHtml(dealer.priceText)}` : ''}</p>` : ''}
+        ${dealer.offerDetails ? `<p>${escapeHtml(dealer.offerDetails)}</p>` : ''}
+        <p><a href="${escapeHtml(dealer.url)}" target="_blank" rel="noopener noreferrer">View source (${escapeHtml(dealer.domain)})</a></p>
+      </div>`).join('')
+    : '<p class="empty-state">No dealers/offers for this vehicle near you appeared in the public sources retrieved — none have been invented. Try a wider location, or check the manufacturer\'s dealer locator.</p>'}
+    <p><span class="flex-badge flex-${escapeHtml(flex.level || 'unknown')}">Pricing flexibility: ${escapeHtml(flex.level || 'unknown')}${flex.confidence ? ` (${escapeHtml(flex.confidence)} confidence)` : ''}</span></p>
+    ${flex.rationale ? `<p>${escapeHtml(flex.rationale)}</p>` : ''}
+    ${flex.signals?.length ? `<ul>${flex.signals.map((s) => `<li>${escapeHtml(s)}</li>`).join('')}</ul>` : ''}
+    ${d.negotiationTips?.length ? `<p><strong>Negotiation tips:</strong> ${escapeHtml(d.negotiationTips.join(' '))}</p>` : ''}
+    <p><small>${escapeHtml(flex.disclaimer || '')}</small></p>`;
+}
+async function runDealerOffers(vehicleName) {
+  const location = dealerLocationText();
+  if (!location) {
+    pendingDealerVehicle = vehicleName;
+    addMessage('agent', `I can look for dealers and public offers for the ${vehicleName} — what city and ${currentMarket().postalLabel} should I search around?`);
+    $('#chatInput')?.focus({ preventScroll: true });
+    return null;
+  }
+  const ownBusy = !busy;
+  if (ownBusy) { busy = true; setTyping(true); }
+  try {
+    const res = await fetch('/api/dealer-offers', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ vehicle: vehicleName, location, market: currentMarket().code, currency: currentCurrency() }),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data) throw new Error(data?.error || `Dealer search unavailable (HTTP ${res.status})`);
+    dealerResults[vehicleName] = data;
+    renderSuggestions();
+    addMessage('agent', dealerSummaryText(data));
+    save();
+    document.getElementById(`dealers-${vehicleName.replace(/\W+/g, '-')}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    return data;
+  } catch (err) {
+    console.warn('Dealer search failed:', err);
+    addMessage('system', `I could not complete that dealer search (${err.message || 'unknown error'}). It needs the backend running via npm start with an LLM configured.`);
+    return null;
+  } finally {
+    if (ownBusy) { busy = false; setTyping(false); renderTopicProgress(); renderProfilePanel(); }
+  }
+}
+function dealerSummaryText(d) {
+  if (!d.dealers?.length) return `I searched public sources for ${d.vehicle} dealers and offers near ${d.location}, but nothing solid surfaced — so I haven't invented any dealers. The panel explains what was checked; a wider location or the manufacturer's dealer locator is the next step. Pricing flexibility here is unknown from public signals.`;
+  const first = d.dealers[0];
+  return `Dealer search for the ${d.vehicle} near ${d.location} 📍\n\nI found ${d.dealers.length} grounded dealer lead${d.dealers.length === 1 ? '' : 's'} in public sources — for example ${first.name}${first.offerTitle ? ` advertising "${first.offerTitle}"` : ''}. Pricing flexibility looks ${d.flexibility.level} based on public signals (${d.flexibility.rationale})\n\nFull dealer cards, offers, sources and negotiation tips are in the panel. These are public web listings, not live stock — confirm price and availability with the dealer before travelling.`;
 }
 
 // ---------------- Vehicle analysis flow ----------------
@@ -323,7 +688,7 @@ async function runVehicleAnalysis(query) {
   try {
     const res = await fetch('/api/vehicle-analysis', {
       method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-      body: JSON.stringify({ query }),
+      body: JSON.stringify({ query, market: currentMarket().code, currency: currentMarket().currency }),
     });
     const data = await res.json().catch(() => null);
     if (!res.ok || !data?.vehicle) throw new Error(data?.error || `Vehicle analysis unavailable (HTTP ${res.status})`);
@@ -336,7 +701,7 @@ async function runVehicleAnalysis(query) {
     return data;
   } catch (err) {
     console.warn('Vehicle analysis failed:', err);
-    addMessage('system', `I could not complete that grounded vehicle analysis (${err.message || 'unknown error'}). It needs the DriveMatch backend running via npm start with Muse Wonder configured — then try again.`);
+    addMessage('system', `I could not complete that grounded vehicle analysis (${err.message || 'unknown error'}). It needs the DriveMatch backend running via npm start with an LLM configured — then try again.`);
     return null;
   } finally {
     if (ownBusy) { busy = false; setTyping(false); renderTopicProgress(); renderProfilePanel(); }
@@ -345,7 +710,7 @@ async function runVehicleAnalysis(query) {
 
 function vehicleSummaryText(d) {
   const v = d.vehicle;
-  const currency = v.priceGuide?.currency || 'USD';
+  const currency = v.priceGuide?.currency || currentCurrency();
   const price = v.priceGuide?.starting ? `Grounded indicative pricing starts around ${formatMoney(v.priceGuide.starting, currency)} (${currency}, before local taxes/fees, from the cited sources).` : 'The grounded sources did not support a reliable guide price — enter your local price in the financing calculator.';
   const sentiment = d.sentiment && d.sentiment.score !== null
     ? `Owner sentiment (grounded in the social/forum/owner sources retrieved ${d.asOf || 'today'}): ${d.sentiment.score}/100 (${d.sentiment.distribution.positive}% positive / ${d.sentiment.distribution.neutral}% neutral / ${d.sentiment.distribution.negative}% negative). Owners love: ${d.sentiment.loves.join(', ').toLowerCase()}. Common complaints: ${d.sentiment.complaints.join(', ').toLowerCase()}.`
@@ -363,14 +728,14 @@ function sentimentSummaryText(d, complaintsOnly = false) {
 }
 function optionsSummaryText(d) {
   const v = d.vehicle;
-  const trims = d.trims.length ? d.trims.map((t) => `${t.name}${t.priceFrom ? ` (from ~${formatMoney(t.priceFrom, d.vehicle.priceGuide?.currency || 'USD')})` : ''}`).join(', ') : 'the grounded sources did not verify a full trim list — check the official configurator for this market/year';
+  const trims = d.trims.length ? d.trims.map((t) => `${t.name}${t.priceFrom ? ` (from ~${formatMoney(t.priceFrom, d.vehicle.priceGuide?.currency || currentCurrency())})` : ''}`).join(', ') : 'the grounded sources did not verify a full trim list — check the official configurator for this market/year';
   const colours = d.exteriorColours.length ? d.exteriorColours.map((c) => c.name).join(', ') : 'manufacturer palettes vary by market/year';
   const opts = d.options.map((o) => o.name).join(', ');
   return `${v.make} ${v.model} breakdown:\n\nTrims: ${trims}.\nColours (examples): ${colours}.\nPopular options/add-ons: ${opts}.\n\nThe panel has per-trim highlights, colour swatches and what each add-on gets you.`;
 }
 function similarSummaryText(d) {
   if (!d.similar.length) return `The comparison sources didn't support confident rivals for the ${d.vehicle.make} ${d.vehicle.model} — tell me a budget and body style and I'll suggest the closest categories instead.`;
-  return `Similar to the ${d.vehicle.make} ${d.vehicle.model}, consider:\n\n${d.similar.map((s) => `• ${s.make} ${s.model} — ${s.category}${s.priceGuide?.starting ? `, from ~${formatMoney(s.priceGuide.starting, s.priceGuide.currency || 'USD')}` : ''}. Why: ${s.whyConsider.join(', ').toLowerCase()}. Difference: ${s.keyDifference}.`).join('\n')}\n\nTap Analyse on any of them in the panel to dig in, or ask me here.`;
+  return `Similar to the ${d.vehicle.make} ${d.vehicle.model}, consider:\n\n${d.similar.map((s) => `• ${s.make} ${s.model} — ${s.category}${s.priceGuide?.starting ? `, from ~${formatMoney(s.priceGuide.starting, s.priceGuide.currency || currentCurrency())}` : ''}. Why: ${s.whyConsider.join(', ').toLowerCase()}. Difference: ${s.keyDifference}.`).join('\n')}\n\nTap Analyse on any of them in the panel to dig in, or ask me here.`;
 }
 
 // ---------------- Local agent ----------------
@@ -395,16 +760,23 @@ function handleLocally(text) {
 
   if (isComplete) {
     guidelines = buildGuidelines(profile);
+    awaitingConfirmation = true;
     addMessage('agent', changed.length
-      ? `Updated — I've noted ${changed.join(', ')} and refreshed your guidelines in the panel. Anything else you'd like to change?`
-      : `Got it, I've added that to your profile and refreshed your guidelines. Anything else?`);
+      ? `Updated — I've noted ${changed.join(', ')} and refreshed your guidelines in the panel. Does the updated profile look right now? Tap Confirm, or tell me what else to change.`
+      : `Got it, I've added that to your profile and refreshed your guidelines. Does it look right now? Tap Confirm when you're happy.`);
     return;
   }
 
+  const leavingIntro = TOPICS[topicIndex]?.id === 'intro';
   advanceTopic();
   const ack = changed.length ? `Got it — noted: ${changed.join(' · ')}.\n\n` : `Thanks, noted.\n\n`;
   if (topicIndex >= TOPICS.length) {
     addMessage('agent', ack + finishConversation());
+  } else if (leavingIntro && (marketSource === 'default' || marketSource === 'locale') && !profile.location) {
+    // We couldn't place them — ask their country naturally instead of
+    // silently assuming. Their answer is handled in submitInput.
+    awaitingMarketClarification = true;
+    addMessage('agent', `${ack}Quick one before we continue: which country are you in? It sets your postal format and the local currency I price vehicles in.\n\nAnd ${TOPICS[topicIndex].prompt().charAt(0).toLowerCase()}${TOPICS[topicIndex].prompt().slice(1)}`);
   } else {
     addMessage('agent', ack + TOPICS[topicIndex].prompt());
   }
@@ -412,10 +784,55 @@ function handleLocally(text) {
 function advanceTopic() { topicIndex = Math.min(topicIndex + 1, TOPICS.length); }
 function finishConversation(prefix = '') {
   isComplete = true;
+  profileConfirmed = false;
+  awaitingConfirmation = true;
   guidelines = buildGuidelines(profile);
   const persona = inferPersona(profile);
   const tops = topPriorities(profile, 3);
-  return `${prefix ? prefix + '\n\n' : ''}That's everything I need — thanks${profile.firstName ? ', ' + profile.firstName : ''}! 🎉\n\nHere's who I'm shopping for: **${persona.name}** — ${persona.blurb}\nTop priorities: ${tops.join(', ') || 'balanced across the board'}.\n\nI've turned your answers into vehicle-selection guidelines in the panel beside this chat — that's the rulebook we'll use to pick and rank vehicles for you next. Have a read, and just tell me here if anything's wrong or missing.`.replace(/\*\*/g, '');
+  return `${prefix ? prefix + '\n\n' : ''}That's everything I need — thanks${profile.firstName ? ', ' + profile.firstName : ''}! 🎉\n\nHere's who I'm shopping for: ${persona.name} — ${persona.blurb}\nTop priorities: ${tops.join(', ') || 'balanced across the board'}.\n\nI've built your vehicle-selection guidelines in the panel beside this chat. Before we use them: does this profile look right? Tap "Confirm my profile" and I'll show the full guidelines here and give you download and vehicle-suggestion options — or tell me what to change.`;
+}
+
+// ---- Confirmation, in-chat guidelines, downloads ----
+function guidelinesToText() {
+  if (!guidelines.length) guidelines = buildGuidelines(profile);
+  return guidelines.map((g) => `${g.title}\n${g.points.map((p) => `• ${p}`).join('\n')}`).join('\n\n');
+}
+function confirmProfile() {
+  profileConfirmed = true;
+  awaitingConfirmation = false;
+  isComplete = true;
+  guidelines = buildGuidelines(profile);
+  renderProfilePanel();
+  addMessage('agent', `Profile confirmed${profile.firstName ? ` — thanks, ${profile.firstName}` : ''} ✅\n\n🧭 Here are your vehicle-selection guidelines:\n\n${guidelinesToText()}\n\nWhat would you like to do next?\n• 🚗 Suggest vehicles for me — I'll find your Top 3 matches from this profile\n• ⬇ Download guidelines (PDF) — a printable copy to save\n• ⬇ Download guidelines (JSON) — bring this file back anytime and upload it, and I'll pick up right where we left off\n\nTap an option below, or just type what you'd like.`);
+  customQuickReplies = ['🚗 Suggest vehicles for me', '⬇ Download guidelines (PDF)', '⬇ Download guidelines (JSON)', '✏️ Edit my profile'];
+  save();
+}
+function handleConfirmationFlow(text) {
+  const lower = text.toLowerCase().trim();
+  // Choosing suggestions/downloads while awaiting confirmation counts
+  // as confirming — show the guidelines first, then carry on.
+  if (awaitingConfirmation && /\b(suggest|recommend)\b.*\b(vehicle|car|match)|\bvehicles for me\b/.test(lower)) { confirmProfile(); return false; }
+  if (awaitingConfirmation && /\bdownload\b/.test(lower)) confirmProfile();
+  // Download / suggestion actions are available once confirmed.
+  if (profileConfirmed) {
+    if (/\bdownload\b.*\bpdf\b|\bpdf\b/.test(lower)) { downloadGuidelinesPdf(); addMessage('agent', 'I opened your guidelines as a printable view — choose "Save as PDF" in the print dialog to keep your copy. Anything else: suggest vehicles, or edit your profile?'); customQuickReplies = ['🚗 Suggest vehicles for me', '⬇ Download guidelines (JSON)', '✏️ Edit my profile']; return true; }
+    if (/\bdownload\b.*\bjson\b|\bjson\b/.test(lower)) { downloadProfile(); addMessage('agent', 'Your guidelines JSON is downloading. Keep it safe — on your next visit, tap "Upload guidelines" and I\'ll restore this profile and make suggestions from it straight away.'); customQuickReplies = ['🚗 Suggest vehicles for me', '⬇ Download guidelines (PDF)']; return true; }
+    if (/\bedit\b|\bchange\b|\bupdate\b/.test(lower) && !/\bsuggest\b/.test(lower)) { profileConfirmed = false; addMessage('agent', 'Of course — tell me what to change and I\'ll update your profile and guidelines, then ask you to confirm again.'); return true; }
+    return false; // suggestions & everything else flow normally
+  }
+  if (!awaitingConfirmation) return false;
+  if (/^(✅\s*)?(confirm|confirmed|yes|yeah|yep|looks (right|good|correct)|that'?s (right|correct|good)|perfect|happy|go ahead|proceed)\b/.test(lower)) { confirmProfile(); return true; }
+  if (/show.*guidelines|guidelines please/.test(lower)) {
+    guidelines = buildGuidelines(profile);
+    addMessage('agent', `Here are your current (unconfirmed) guidelines:\n\n${guidelinesToText()}\n\nHappy with them? Tap Confirm, or tell me what to change.`);
+    return true;
+  }
+  if (/edit|change|wrong|update|actually/.test(lower)) {
+    awaitingConfirmation = false;
+    addMessage('agent', 'No problem — tell me what to change and I\'ll update your profile and guidelines, then ask you to confirm again.');
+    return true;
+  }
+  return false;
 }
 
 // --- lightweight extraction (also used as a safety net under the LLM) ---
@@ -426,12 +843,28 @@ function extractFromText(text, topicId) {
   // Name / location
   let m = t.match(/(?:my name is|i'm|i am|call me|name'?s)\s+([A-Z][a-z]{1,20})\b/i);
   if (m && !profile.firstName) profile.firstName = capitalise(m[1]);
-  m = t.match(/(?:live in|from|based in|located in|i'?m in)\s+([A-Z][A-Za-z.'-]*(?:\s+[A-Z][A-Za-z.'-]*){0,2}(?:,\s*[A-Z]{2})?)/);
+  m = t.match(/(?:live in|from|based in|located in|i'?m in|moved to|relocated to|now in)\s+([A-Z][A-Za-z.'-]*(?:\s+[A-Z][A-Za-z.'-]*){0,2}(?:,\s*[A-Z]{2})?)/);
   if (m) profile.location = cleanPlace(m[1]);
+
+  // Postal-format signals (detection in submitInput usually sets the
+  // market first; this keeps the profile fields themselves accurate).
+  const postalCa = text.match(/\b[A-Za-z]\d[A-Za-z][ -]?\d[A-Za-z]\d\b/);
+  const postcodeUk = !postalCa && text.match(/\b[A-Za-z]{1,2}\d[A-Za-z\d]?\s*\d[A-Za-z]{2}\b/);
+  if (postalCa) {
+    profile.postalCode = postalCa[0].toUpperCase().replace(/([A-Z]\d[A-Z])(\d[A-Z]\d)/, '$1 $2');
+    profile.country = countryNameFor('CA'); profile.countryCode = 'CA';
+  } else if (postcodeUk && (selectedMarketCode === 'GB' || /\bpostcode\b/i.test(text))) {
+    profile.postalCode = postcodeUk[0].toUpperCase();
+    profile.country = countryNameFor('GB'); profile.countryCode = 'GB';
+  }
+  if (!postalCa && !profile.postalCode && (topicId === 'intro' || /\bzip\b/i.test(text))) {
+    const zip = text.match(/\b\d{5}(?:-\d{4})?\b/);
+    if (zip) profile.postalCode = zip[0];
+  }
   if (topicId === 'intro') {
     const parts = text.split(',').map((s) => s.trim()).filter(Boolean);
     if (!profile.firstName && parts[0] && parts[0].split(/\s+/).length <= 2 && !/\d/.test(parts[0])) profile.firstName = capitalise(parts[0].replace(/^(hi|hey|hello)\s+/i, ''));
-    if (!profile.location && parts[1] && parts.length <= 3 && !/\b(live|drive|work|family|buying|looking)\b/i.test(parts[1])) profile.location = cleanPlace(parts[1]);
+    if (!profile.location && parts[1] && parts.length <= 3 && !/\b(live|drive|work|family|buying|looking)\b/i.test(parts[1]) && !/^[A-Za-z]\d[A-Za-z][ -]?\d[A-Za-z]\d$/.test(parts[1]) && !/^\d{5}(?:-\d{4})?$/.test(parts[1])) profile.location = cleanPlace(parts[1]);
     if (!profile.firstName && /^[A-Z][a-z]{1,20}$/.test(text.trim())) profile.firstName = text.trim();
   }
 
@@ -540,19 +973,21 @@ function capitalise(s) { return s ? s.charAt(0).toUpperCase() + s.slice(1) : s; 
 function cleanPlace(s) { return s.replace(/\s+/g, ' ').replace(/[.\s]+$/, '').trim().slice(0, 40); }
 function clamp(n, a, b) { return Math.min(b, Math.max(a, n)); }
 function budgetLabel(v) {
-  if (v < 15000) return 'Under $15,000';
-  if (v <= 25000) return '$15,000 – $25,000';
-  if (v <= 35000) return '$25,000 – $35,000';
-  if (v <= 50000) return '$35,000 – $50,000';
-  if (v <= 75000) return '$50,000 – $75,000';
-  return '$75,000+';
+  const f = (n) => formatMoney(n, currentCurrency());
+  if (v < 15000) return `Under ${f(15000)}`;
+  if (v <= 25000) return `${f(15000)} – ${f(25000)}`;
+  if (v <= 35000) return `${f(25000)} – ${f(35000)}`;
+  if (v <= 50000) return `${f(35000)} – ${f(50000)}`;
+  if (v <= 75000) return `${f(50000)} – ${f(75000)}`;
+  return `${f(75000)}+`;
 }
 function monthlyLabel(v) {
-  if (v < 250) return 'Under $250/mo';
-  if (v <= 400) return '$250 – $400/mo';
-  if (v <= 600) return '$400 – $600/mo';
-  if (v <= 850) return '$600 – $850/mo';
-  return '$850+/mo';
+  const f = (n) => formatMoney(n, currentCurrency());
+  if (v < 250) return `Under ${f(250)}/mo`;
+  if (v <= 400) return `${f(250)} – ${f(400)}/mo`;
+  if (v <= 600) return `${f(400)} – ${f(600)}/mo`;
+  if (v <= 850) return `${f(600)} – ${f(850)}/mo`;
+  return `${f(850)}+/mo`;
 }
 const FIELD_LABELS = { firstName: 'name', location: 'location', household: 'household', experience: 'experience', primaryUse: 'main use', dailyMiles: 'daily miles', passengers: 'passengers', fuel: 'fuel preference', condition: 'new/used preference', budget: 'budget', monthly: 'monthly budget', payment: 'payment plan', keepYears: 'how long you’ll keep it', tradeIn: 'trade-in', timeline: 'timeline', notes: 'extra detail' };
 function diffLabels(beforeJson, after) {
@@ -579,13 +1014,14 @@ async function handleWithLLM(userText) {
 
     if (data.is_complete || topicIndex >= TOPICS.length) {
       isComplete = true;
+      awaitingConfirmation = !profileConfirmed;
       guidelines = Array.isArray(data.guidelines) && data.guidelines.length ? sanitiseGuidelines(data.guidelines) : buildGuidelines(profile);
     }
     addMessage('agent', (data.reply || '').trim() || 'Thanks — noted. Tell me a bit more.');
     if (Array.isArray(data.quick_replies) && data.quick_replies.length) customQuickReplies = data.quick_replies.slice(0, 4);
   } catch (err) {
     console.warn('Backend agent unavailable, falling back to local agent:', err);
-    addMessage('system', 'Muse Wonder (via the backend) could not be reached — continuing with the local agent so your chat is not interrupted.');
+    addMessage('system', 'The Muse models (via the backend) could not be reached — continuing with the local agent so your chat is not interrupted.');
     handleLocally(userText);
   }
 }
@@ -639,8 +1075,8 @@ function sanitiseGuidelines(list) {
 }
 
 // ---------------- Vehicle panel, financing, vehicle -> profile ----------------
-const CURRENCIES = ['USD', 'EUR', 'GBP', 'ZAR', 'AUD', 'CAD', 'NZD', 'JPY', 'CHF', 'INR', 'AED'];
-function formatMoney(value, currency = 'USD') {
+const CURRENCIES = ['USD', 'EUR', 'GBP', 'ZAR', 'AUD', 'CAD', 'NZD', 'JPY', 'CHF', 'INR', 'AED', 'SGD', 'BRL', 'MXN', 'KRW', 'SEK', 'NOK', 'DKK', 'PLN'];
+function formatMoney(value, currency = currentCurrency()) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return '—';
   try { return new Intl.NumberFormat(undefined, { style: 'currency', currency, maximumFractionDigits: 0 }).format(Number(value)); }
   catch { return `${currency} ${Math.round(Number(value)).toLocaleString()}`; }
@@ -660,7 +1096,7 @@ function renderVehiclePanel(resetFinance = false) {
   $('#financeToolBtn').disabled = false;
   $('#vehicleProfileToolBtn').disabled = false;
 
-  const guideCurrency = v.priceGuide?.currency || 'USD';
+  const guideCurrency = v.priceGuide?.currency || currentCurrency();
   const priceHtml = v.priceGuide?.starting
     ? `${formatMoney(v.priceGuide.starting, guideCurrency)}${v.priceGuide.typicalTop ? ` – ${formatMoney(v.priceGuide.typicalTop, guideCurrency)}` : ''}<br><small>${escapeHtml(v.priceGuide.note || '')}</small>`
     : escapeHtml(v.priceGuide?.note || 'Enter local pricing in the calculator.');
@@ -760,11 +1196,11 @@ function setupFinanceDefaults(d) {
   if (d.vehicle.priceGuide?.starting) priceEl.value = d.vehicle.priceGuide.starting;
   else if (!priceEl.value) priceEl.value = '';
   const guideCurrency = d.vehicle.priceGuide?.currency;
-  $('#finCurrency').value = CURRENCIES.includes(guideCurrency) ? guideCurrency : 'USD';
+  $('#finCurrency').value = CURRENCIES.includes(guideCurrency) ? guideCurrency : currentCurrency();
 }
 function getFinanceInputs() {
   return {
-    currency: CURRENCIES.includes($('#finCurrency').value) ? $('#finCurrency').value : 'USD',
+    currency: CURRENCIES.includes($('#finCurrency').value) ? $('#finCurrency').value : currentCurrency(),
     price: Number($('#finPrice').value) || 0,
     deposit: Number($('#finDeposit').value) || 0,
     tradeIn: Number($('#finTradeIn').value) || 0,
@@ -796,7 +1232,7 @@ function renderFinanceResults() {
 function financeSnapshotText() {
   const inp = getFinanceInputs();
   const v = currentVehicleAnalysis?.vehicle;
-  if (!inp.price) return `The financing calculator is in the Vehicle Analysis panel — pick your currency and enter the ${v ? `${v.make} ${v.model}'s` : "vehicle's"} local price, deposit, trade-in, term and APR, and I'll estimate the monthly payment. It defaults to the demo guide price in USD when we have one.`;
+  if (!inp.price) return `The financing calculator is in the Vehicle Analysis panel — pick your currency and enter the ${v ? `${v.make} ${v.model}'s` : "vehicle's"} local price, deposit, trade-in, term and APR, and I'll estimate the monthly payment. It defaults to the grounded guide price in your market's currency when we have one.`;
   const r = calculateFinance(inp);
   return `Quick financing estimate${v ? ` for the ${v.make} ${v.model}` : ''} in ${inp.currency}: about ${formatMoney(r.monthly, inp.currency)}/month over ${inp.termMonths} months at ${inp.apr.toFixed(1)}% APR, financing ${formatMoney(r.principal, inp.currency)} with ${formatMoney(r.totalInterest, inp.currency)} total interest. Adjust currency, price, deposit or term in the calculator panel — it's an estimate, not financial advice.`;
 }
@@ -823,6 +1259,7 @@ function applyVehicleProfile() {
   });
 
   isComplete = false;
+  profileConfirmed = false; awaitingConfirmation = false;
   guidelines = buildGuidelines(profile);
   // Pick the first thing we still need from the user, so the chat edits the draft in order.
   topicIndex = !profile.firstName ? 0 : (!profile.household && !profile.experience) ? 1 : (profile.dailyMiles === null || profile.dailyMiles === '') ? 3 : 6;
@@ -941,7 +1378,7 @@ function renderProfilePanel() {
   $('#personaPanel').innerHTML = hasAnything ? `<div class="persona-banner"><small style="letter-spacing:.1em;font-weight:800">YOUR DRIVER PERSONA</small><h3>${escapeHtml(persona.name)}${profile.firstName ? ` — hi, ${escapeHtml(profile.firstName)}!` : ''}</h3><p>${escapeHtml(persona.blurb)}</p></div>` : '';
   const tops = topPriorities(profile, 4);
   $('#profilePanel').innerHTML = hasAnything ? [
-    groupHtml('About you', [['Name', profile.firstName], ['Location', profile.location], ['Household', profile.household], ['Experience', profile.experience]]),
+    groupHtml('About you', [['Name', profile.firstName], ['Location', profile.location], ['Country', profile.country], [currentMarket().postalLabel.charAt(0).toUpperCase() + currentMarket().postalLabel.slice(1), profile.postalCode], ['Household', profile.household], ['Experience', profile.experience]]),
     groupHtml('Driving life', [['Main use', profile.primaryUse], ['Daily miles', profile.dailyMiles !== null && profile.dailyMiles !== '' ? `~${profile.dailyMiles} (${(profile.dailyMiles * 365).toLocaleString()}/yr)` : ''], ['Passengers', profile.passengers], ['Carries', profile.cargo], ['Roads', profile.terrain]]),
     groupHtml('Vehicle leanings', [['Interested in', profile.interestedVehicle], ['Drafted from', profile.sourceVehicle], ['Body styles', profile.bodyStyles], ['Fuel', profile.fuel], ['Condition', profile.condition], ['Must-haves', profile.features]]),
     groupHtml('Budget & ownership', [['Budget', profile.budget], ['Monthly', profile.monthly], ['Payment', profile.payment], ['Keep for', profile.keepYears], ['Trade-in', profile.tradeIn], ['Timeline', profile.timeline]]),
@@ -964,7 +1401,7 @@ function save() {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ profile, conversation, topicIndex, isComplete, guidelines, vehicleAnalysis: currentVehicleAnalysis, finance: (() => { try { return getFinanceInputs(); } catch { return null; } })(), savedAt: Date.now() }));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ profile, market: selectedMarketCode, marketSource, currency: selectedCurrency, conversation, topicIndex, isComplete, profileConfirmed, awaitingConfirmation, guidelines, vehicleAnalysis: currentVehicleAnalysis, suggestions: currentSuggestions, dealerResults, finance: (() => { try { return getFinanceInputs(); } catch { return null; } })(), savedAt: Date.now() }));
       $('#saveNote').textContent = '✓ Saved';
       $('#resumeBtn').hidden = false;
     } catch { $('#saveNote').textContent = 'Could not save'; }
@@ -975,8 +1412,12 @@ function loadSaved() {
     const raw = localStorage.getItem(STORAGE_KEY); if (!raw) return;
     const data = JSON.parse(raw);
     if (data.profile) profile = { ...emptyProfile(), ...data.profile, priorities: data.profile.priorities || {}, prioritiesMentioned: data.profile.prioritiesMentioned || [] };
+    setMarket(data.market || profile.countryCode || '', { source: data.marketSource || (data.market ? 'chat' : 'default'), updateFinance: false, currency: data.currency || undefined });
+    if (data.currency) selectedCurrency = data.currency;
     if (Array.isArray(data.conversation)) conversation = data.conversation;
     topicIndex = data.topicIndex || 0; isComplete = !!data.isComplete;
+    profileConfirmed = !!data.profileConfirmed;
+    awaitingConfirmation = typeof data.awaitingConfirmation === 'boolean' ? data.awaitingConfirmation : (isComplete && !profileConfirmed);
     guidelines = Array.isArray(data.guidelines) ? data.guidelines : [];
     if (data.vehicleAnalysis?.vehicle) {
       currentVehicleAnalysis = data.vehicleAnalysis;
@@ -992,6 +1433,7 @@ function loadSaved() {
         renderFinanceResults();
       }
     }
+    if (data.suggestions?.candidates?.length) { currentSuggestions = data.suggestions; dealerResults = data.dealerResults || {}; renderSuggestions(); }
     if (conversation.length) {
       $('#resumeBtn').hidden = false;
       $('#agent').hidden = false; started = true;
@@ -1005,11 +1447,97 @@ function applySeed(prefill, prefillFuel) {
   if (prefill || prefillFuel) save();
 }
 function downloadProfile() {
-  const payload = { profile, guidelines, vehicleAnalysis: currentVehicleAnalysis, finance: (() => { try { return { ...getFinanceInputs(), estimate: calculateFinance(getFinanceInputs()) }; } catch { return null; } })(), persona: inferPersona(profile), exportedAt: new Date().toISOString(), source: llmIsConfigured() ? backend.providerModel : 'local-agent' };
+  if (!guidelines.length) guidelines = buildGuidelines(profile);
+  const payload = { format: 'drivematch-profile-guidelines/v1', profile, guidelines, profileConfirmed, market: selectedMarketCode, currency: selectedCurrency, vehicleAnalysis: currentVehicleAnalysis, suggestions: currentSuggestions, dealerResults, finance: (() => { try { return { ...getFinanceInputs(), estimate: calculateFinance(getFinanceInputs()) }; } catch { return null; } })(), persona: inferPersona(profile), exportedAt: new Date().toISOString(), source: llmIsConfigured() ? backend.providerModel : 'local-agent' };
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
-  a.download = `drivematch-profile-${(profile.firstName || 'driver').toLowerCase()}.json`; a.click();
-  URL.revokeObjectURL(a.href); showToast('Profile + guidelines downloaded.');
+  a.download = `drivematch-guidelines-${(profile.firstName || 'driver').toLowerCase()}.json`; a.click();
+  URL.revokeObjectURL(a.href); showToast('Guidelines downloaded (JSON) — upload this file on your next visit to restore your profile.');
+}
+
+function downloadGuidelinesPdf() {
+  if (!guidelines.length) guidelines = buildGuidelines(profile);
+  const persona = inferPersona(profile);
+  const date = new Date().toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' });
+  const profileRows = [
+    ['Name', profile.firstName], ['Location', [profile.location, profile.postalCode, profile.country].filter(Boolean).join(', ')],
+    ['Household', profile.household], ['Main use', profile.primaryUse],
+    ['Daily driving', profile.dailyMiles !== null && profile.dailyMiles !== '' ? `~${profile.dailyMiles} miles/day` : ''],
+    ['Budget', profile.budget], ['Monthly comfort', profile.monthly], ['Fuel preference', profile.fuel],
+    ['Body styles', (profile.bodyStyles || []).join(', ')], ['Must-haves', (profile.features || []).join(', ')],
+    ['Interested in', profile.interestedVehicle],
+  ].filter(([, v]) => v);
+  $('#printArea').innerHTML = `
+    <h1>DriveMatch — Your Vehicle-Selection Guidelines</h1>
+    <p class="print-meta">For ${escapeHtml(profile.firstName || 'you')} · ${escapeHtml(persona.name)} · Generated ${escapeHtml(date)}</p>
+    <p>${escapeHtml(persona.blurb)}</p>
+    <h2>Your profile at a glance</h2>
+    <ul>${profileRows.map(([k, v]) => `<li><strong>${escapeHtml(k)}:</strong> ${escapeHtml(v)}</li>`).join('')}</ul>
+    <h2>Guidelines we'll use to select your vehicles</h2>
+    ${guidelines.map((g) => `<div class="print-block"><h3>${escapeHtml(g.title)}</h3><ul>${g.points.map((p) => `<li>${escapeHtml(p)}</li>`).join('')}</ul></div>`).join('')}
+    <p class="print-meta">Keep this file with its JSON companion: upload the JSON at drivematch on your next visit and your agent will restore this profile and suggest vehicles from these guidelines. Prices and offers change — verify before buying.</p>`;
+  document.body.classList.add('printing-guidelines');
+  const cleanup = () => { document.body.classList.remove('printing-guidelines'); window.removeEventListener('afterprint', cleanup); };
+  window.addEventListener('afterprint', cleanup);
+  window.print();
+  setTimeout(cleanup, 1000);
+}
+
+// ---- Returning users: upload a previously downloaded guidelines JSON ----
+function sanitiseUploadedProfile(input) {
+  const clean = emptyProfile();
+  if (!input || typeof input !== 'object') return clean;
+  for (const key of Object.keys(clean)) {
+    if (!(key in input)) continue;
+    const val = input[key];
+    if (Array.isArray(clean[key])) { if (Array.isArray(val)) clean[key] = val.filter((x) => typeof x === 'string').slice(0, 12).map((x) => x.slice(0, 100)); }
+    else if (key === 'priorities') {
+      if (val && typeof val === 'object') for (const [k, v] of Object.entries(val)) clean.priorities[k] = clamp(Number(v) || 0, 0, 5);
+    } else if (key === 'dailyMiles') clean[key] = val === null || val === '' ? null : clamp(Number(val) || 0, 0, 500);
+    else if (typeof val === 'string') clean[key] = val.slice(0, 300);
+  }
+  if (Array.isArray(input.prioritiesMentioned)) clean.prioritiesMentioned = input.prioritiesMentioned.filter((x) => typeof x === 'string').slice(0, 10);
+  return clean;
+}
+async function handleGuidelinesUpload(file) {
+  if (!file) return;
+  try {
+    const parsed = JSON.parse(await file.text());
+    const uploadedProfile = parsed.profile || parsed.driverProfile || null;
+    const uploadedGuidelines = sanitiseGuidelines(parsed.guidelines || parsed.selectionGuidelines || []);
+    if (!uploadedProfile && !uploadedGuidelines.length) throw new Error('That file does not look like a DriveMatch guidelines export (no profile or guidelines found).');
+
+    // Open the chat without the standard greeting if this is a fresh visit.
+    const sec = $('#agent'); sec.hidden = false; started = true;
+    sec.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+    if (uploadedProfile) {
+      const keepMarket = { country: profile.country, countryCode: profile.countryCode, postalCode: profile.postalCode };
+      profile = { ...sanitiseUploadedProfile(uploadedProfile) };
+      if (!profile.country && keepMarket.country) { profile.country = keepMarket.country; profile.countryCode = keepMarket.countryCode; profile.postalCode = profile.postalCode || keepMarket.postalCode; }
+    } else {
+      // Guidelines-only file: derive a starter profile from the text so
+      // suggestions have something to score against.
+      profile = emptyProfile();
+      extractFromText(uploadedGuidelines.map((g) => `${g.title} ${g.points.join(' ')}`).join(' '), 'priorities');
+    }
+    if (profile.countryCode) setMarket(profile.countryCode, { source: 'chat', currency: parsed.currency || undefined });
+    guidelines = uploadedGuidelines.length ? uploadedGuidelines : buildGuidelines(profile);
+    profileConfirmed = true; awaitingConfirmation = false; isComplete = true; topicIndex = TOPICS.length;
+    currentSuggestions = null; dealerResults = {};
+    renderTopicProgress(); renderProfilePanel(); renderSuggestions();
+    addMessage('agent', `Welcome back${profile.firstName ? `, ${profile.firstName}` : ''}! 👋 I've restored your profile and guidelines from your uploaded file.\n\n🧭 Your guidelines are active again:\n\n${guidelinesToText()}\n\nWant me to suggest vehicles from these guidelines right away, or would you like to change anything first?`);
+    customQuickReplies = ['🚗 Suggest vehicles for me', '✏️ Edit my profile', '⬇ Download guidelines (PDF)', '⬇ Download guidelines (JSON)'];
+    renderQuickReplies();
+    showToast('Guidelines restored — welcome back!');
+    save();
+  } catch (err) {
+    console.warn('Guidelines upload failed:', err);
+    showToast('Could not read that file — please upload the DriveMatch guidelines JSON you downloaded.');
+    if (started) addMessage('system', 'That upload did not look like a DriveMatch guidelines JSON, so nothing was changed. Download your guidelines as JSON from a completed profile, then upload that file.');
+  } finally {
+    const input = $('#guidelinesUpload'); if (input) input.value = '';
+  }
 }
 function confirmRestart() {
   if (!confirm('Start over? This clears your saved chat and profile on this device.')) return;

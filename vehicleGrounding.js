@@ -24,6 +24,44 @@ const vehicleCache = require('./vehicleCacheDb');
 const SEARCH_TIMEOUT_MS = Number(process.env.SEARCH_TIMEOUT_MS || 12000);
 const inFlight = new Map(); // normalizedQuery -> Promise (dedupes concurrent requests)
 
+const MARKET_CURRENCIES = {
+  US: 'USD', CA: 'CAD', GB: 'GBP', AU: 'AUD', NZ: 'NZD', ZA: 'ZAR', DE: 'EUR', FR: 'EUR', ES: 'EUR', IT: 'EUR',
+  NL: 'EUR', IE: 'EUR', PT: 'EUR', AT: 'EUR', BE: 'EUR', CH: 'CHF', JP: 'JPY', IN: 'INR', AE: 'AED', SG: 'SGD',
+  BR: 'BRL', MX: 'MXN', KR: 'KRW', CN: 'CNY', SE: 'SEK', NO: 'NOK', DK: 'DKK', PL: 'PLN', TR: 'TRY', ID: 'IDR', TH: 'THB', MY: 'MYR', PH: 'PHP', VN: 'VND', EG: 'EGP', NG: 'NGN', KE: 'KES', AR: 'ARS', CL: 'CLP', CO: 'COP', PE: 'PEN',
+};
+const MARKET_NAME_TO_CODE = {
+  'united states': 'US', usa: 'US', america: 'US', canada: 'CA', 'united kingdom': 'GB', britain: 'GB', england: 'GB',
+  australia: 'AU', 'new zealand': 'NZ', 'south africa': 'ZA', germany: 'DE', france: 'FR', spain: 'ES', italy: 'IT',
+  netherlands: 'NL', ireland: 'IE', switzerland: 'CH', japan: 'JP', india: 'IN', 'united arab emirates': 'AE', uae: 'AE',
+  singapore: 'SG', brazil: 'BR', mexico: 'MX', 'south korea': 'KR', china: 'CN', sweden: 'SE', norway: 'NO', denmark: 'DK', poland: 'PL',
+};
+const MARKET_POSTAL_LABELS = { US: 'ZIP code', GB: 'postcode', AU: 'postcode', NZ: 'postcode', NL: 'postcode', IN: 'PIN code', BR: 'CEP', IE: 'Eircode' };
+function regionName(code) {
+  try { return new Intl.DisplayNames(['en'], { type: 'region' }).of(code) || code; } catch { return code; }
+}
+function normalizeMarket(input) {
+  const obj = typeof input === 'object' && input ? input : {};
+  const raw = String(obj.code || obj.country || obj.market || input || '').trim();
+  const requestedCurrency = String(obj.currency || '').trim().toUpperCase();
+  let code = '';
+  if (/^[A-Za-z]{2}$/.test(raw)) code = raw.toUpperCase();
+  else code = MARKET_NAME_TO_CODE[raw.toLowerCase()] || '';
+  if (!code) {
+    // Unknown/blank market: keep it genuinely unscoped rather than
+    // silently pricing another country. Searches run without a country
+    // qualifier and the UI keeps the user's chosen currency.
+    return { code: '', country: '', currency: /^[A-Z]{3}$/.test(requestedCurrency) ? requestedCurrency : '', postalLabel: 'postal code', searchQualifier: '', officialHint: 'official manufacturer sources for the user\'s market' };
+  }
+  const country = regionName(code);
+  return {
+    code, country,
+    currency: /^[A-Z]{3}$/.test(requestedCurrency) ? requestedCurrency : (MARKET_CURRENCIES[code] || ''),
+    postalLabel: MARKET_POSTAL_LABELS[code] || 'postal code',
+    searchQualifier: country,
+    officialHint: `official ${country} manufacturer sources`,
+  };
+}
+
 const str = (v, max = 300) => (typeof v === 'string' ? v.trim().slice(0, max) : '');
 const num = (v) => (v === null || v === undefined || v === '' || Number.isNaN(Number(v)) ? null : Number(v));
 const arr = (v, max = 12) => (Array.isArray(v) ? v.filter((x) => x !== null && x !== undefined).slice(0, max) : []);
@@ -36,26 +74,29 @@ function stripTags(s) { return decodeEntities(String(s || '').replace(/<[^>]*>/g
 function domainOf(url) { try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return ''; } }
 
 // ---------------- Search retrieval ----------------
-function buildSearchQueries(query, mode = 'full') {
+function buildSearchQueries(query, mode = 'full', marketInput) {
+  const market = normalizeMarket(marketInput);
   const q = query.replace(/\s+/g, ' ').trim();
   const yearHint = /\b(19|20)\d{2}\b/.test(q) ? '' : ' latest model year';
+  const place = market.searchQualifier ? ` ${market.searchQualifier}` : '';
+  const money = market.currency ? ` ${market.currency} pricing` : ' pricing';
   if (mode === 'live') {
     // Variable sections only — used on a stable-cache hit.
     return [
-      { type: 'live-pricing', query: `${q}${yearHint} price MSRP deals current pricing` },
-      { type: 'forum-sentiment', query: `${q} owner forum problems complaints reliability real owners experience` },
+      { type: 'live-pricing', query: `${q}${yearHint}${place}${money} MSRP deals current price` },
+      { type: 'forum-sentiment', query: `${q}${place} owner forum problems complaints reliability real owners experience` },
       { type: 'social-sentiment', query: `${q} owner opinions review ratings sentiment worth buying` },
       { type: 'common-issues', query: `${q} common problems issues recalls owner reported faults reliability` },
     ];
   }
   return [
-    { type: 'official-trims', query: `${q}${yearHint} trims trim levels MSRP price official specifications` },
-    { type: 'colours-options', query: `${q}${yearHint} exterior colours colors interior options packages accessories configurator` },
+    { type: 'official-trims', query: `${q}${yearHint}${place} trims trim levels MSRP price official specifications ${market.officialHint}` },
+    { type: 'colours-options', query: `${q}${yearHint}${place} exterior colours colors interior options packages accessories configurator` },
     { type: 'performance', query: `${q} performance horsepower torque 0-60 acceleration towing capacity fuel economy range safety rating review` },
-    { type: 'forum-sentiment', query: `${q} owner forum problems complaints reliability real owners experience` },
+    { type: 'forum-sentiment', query: `${q}${place} owner forum problems complaints reliability real owners experience` },
     { type: 'social-sentiment', query: `${q} owner opinions review social media sentiment worth buying` },
     { type: 'common-issues', query: `${q} common problems issues recalls owner reported faults reliability` },
-    { type: 'similar', query: `${q} vs competitors similar alternatives comparison best rivals` },
+    { type: 'similar', query: `${q}${place} vs competitors similar alternatives comparison best rivals` },
   ];
 }
 
@@ -113,7 +154,7 @@ async function searchDuckDuckGo(query) {
   return out;
 }
 
-async function retrieveSources(query, { mode = 'full', idOffset = 0 } = {}) {
+async function runSearches(searches, { idOffset = 0 } = {}) {
   const configured = (process.env.SEARCH_PROVIDER || 'auto').toLowerCase();
   const hasKey = !!(process.env.SEARCH_API_KEY || '').trim();
   let provider = configured;
@@ -121,7 +162,6 @@ async function retrieveSources(query, { mode = 'full', idOffset = 0 } = {}) {
   if (provider === 'none') return { provider: 'none', sources: [], warnings: ['Search retrieval disabled (SEARCH_PROVIDER=none).'] };
 
   const searchFn = provider === 'brave' ? searchBrave : provider === 'serper' ? searchSerper : provider === 'duckduckgo' ? searchDuckDuckGo : searchTavily;
-  const searches = buildSearchQueries(query, mode);
   const settled = await Promise.allSettled(searches.map(async (s) => ({ type: s.type, results: await searchFn(s.query) })));
   const warnings = [];
   const byUrl = new Map();
@@ -146,6 +186,10 @@ async function retrieveSources(query, { mode = 'full', idOffset = 0 } = {}) {
   const sources = balanced.slice(0, 18).map((s, i) => ({ id: `S${idOffset + i + 1}`, ...s }));
   await enrichSources(sources);
   return { provider, sources, warnings, searchQueries: searches.map((s) => s.query) };
+}
+
+async function retrieveSources(query, { mode = 'full', idOffset = 0, market } = {}) {
+  return runSearches(buildSearchQueries(query, mode, market), { idOffset });
 }
 
 function extractMainText(html) {
@@ -198,32 +242,37 @@ async function enrichSources(sources) {
 }
 
 // ---------------- LLM synthesis ----------------
-function synthesisPrompt(query, sources, today) {
+function synthesisPrompt(query, sources, today, marketInput) {
+  const market = normalizeMarket(marketInput);
   const sourceText = sources.map((s) => `[${s.id}] (${s.queryType}) ${s.title} — ${s.domain}${s.publishedDate ? `, ${s.publishedDate}` : ''}\nURL: ${s.url}\n${String(s.snippet || '').slice(0, s.queryType?.includes('sentiment') ? 2400 : 2000)}`).join('\n\n');
   return {
     system: `You are DriveMatch's grounded vehicle-research analyst. Today is ${today}. Produce an up-to-date analysis of the vehicle the user asked about using ONLY the web sources provided. Rules:
 - Every factual claim (trims, prices, colours, options, performance, economy, safety, sentiment themes) must come from the sources; append source citations like [S1] to points where practical.
 - NEVER invent trims, colours, prices, specifications or sentiment. If sources are insufficient for a section, return null/empty for it and say what is unverified in confidence.notes.
-- State the assumed model year and market in vehicle.year / vehicle.market (prefer the latest model year and the market evident in the sources; say so if mixed).
+- ${market.code ? `TARGET MARKET: ${market.country} (${market.code}). Prioritise ${market.officialHint} and ${market.country} pricing in ${market.currency}; do not present another country's prices as ${market.currency} or convert currencies. State the assumed model year in vehicle.year and "${market.country}" in vehicle.market (note in confidence.notes if the sources mixed markets).` : 'TARGET MARKET: not specified by the user. Use the market most evident in the sources, state it in vehicle.market, keep prices in their source currency, and never convert currencies.'}
 - Sentiment must be derived from the forum/social/owner sources only: score 0-100, positive/neutral/negative percentages summing to 100, per-source-type breakdown (Social media, Owner forums, Long-term owner reviews) with scores and themes, loves and complaints. If the sources contain ratings or substantive owner-review text, give a best-estimate score/distribution and state in sentiment.note that it is an estimate from the retrieved sources, not a representative statistical sample. Only use score null when there is no sentiment-bearing text at all.
 - Performance must cover, where sourced: power/torque, acceleration, top/economy or EV range/charging, towing/payload if relevant, and safety ratings.
 - Common issues: from the forum/owner/problem sources, list the issues owners actually report — each with a title, severity (high|medium|low, judged by safety/cost impact described in the sources), how frequently it appears in the sources (e.g. "Frequently reported in the retrieved sources"), model years/generations affected if the sources say so, symptoms, and a short sourced description. Never exaggerate frequency beyond what the sources show; if problem sources are thin, return an empty list and say so in confidence.notes.
 - Prices must keep the source currency and be labelled indicative; do not convert currencies.
 - Similar vehicles: name real rivals supported by the comparison sources, with why-to-consider and key differences.
-- generatedProfile is a DRAFT the user will edit: infer bodyStyles, fuel, budget (a range string like "$25,000 – $35,000" in the vehicle's price currency), primaryUse, passengers, cargo, terrain, features, priorities (1-5 map) from the vehicle — clearly reasonable inferences, not facts about the user.
+- generatedProfile is a DRAFT the user will edit: infer bodyStyles, fuel, budget (a range string in the vehicle's price currency), primaryUse, passengers, cargo, terrain, features, priorities (1-5 map) from the vehicle — clearly reasonable inferences, not facts about the user.
 Return ONLY valid JSON in exactly the schema given. No markdown, no commentary outside JSON.`,
-    user: `Vehicle requested: "${query}"\n\nWEB SOURCES:\n${sourceText}\n\nReturn JSON with this exact shape:\n{"vehicle":{"make":"","model":"","year":"","market":"","category":"","bodyStyle":"","seating":5,"powertrains":[],"drivetrains":[],"economy":"","priceGuide":{"currency":"USD","starting":null,"typicalTop":null,"note":""},"strengths":[],"watchouts":[]},"performance":{"summary":"","metrics":[{"label":"","value":""}],"points":[]},"trims":[{"name":"","priceFrom":null,"highlights":[]}],"exteriorColours":[{"name":"","swatch":"#888888"}],"interiors":[],"options":[{"name":"","note":"","description":""}],"sentiment":{"score":null,"distribution":{"positive":0,"neutral":0,"negative":0},"sources":[{"type":"Social media","score":null,"volume":"","themes":[]},{"type":"Owner forums","score":null,"volume":"","themes":[]},{"type":"Long-term owner reviews","score":null,"volume":"","themes":[]}],"loves":[],"complaints":[],"note":""},"similar":[{"make":"","model":"","category":"","priceFrom":null,"currency":"USD","sentimentScore":null,"whyConsider":[],"keyDifference":""}],"commonIssues":[{"title":"","severity":"medium","frequency":"","yearsAffected":"","symptoms":[],"description":""}],"generatedProfile":{"primaryUse":"","passengers":"","cargo":[],"terrain":[],"bodyStyles":[],"fuel":"","features":[],"budget":"","priorities":{},"prioritiesMentioned":[]},"profileAssumptions":[],"confidence":{"level":"high|medium|low","notes":""}}`,
+    user: `Vehicle requested: "${query}"\n\nWEB SOURCES:\n${sourceText}\n\nReturn JSON with this exact shape:\n{"vehicle":{"make":"","model":"","year":"","market":"","category":"","bodyStyle":"","seating":5,"powertrains":[],"drivetrains":[],"economy":"","priceGuide":{"currency":"${market.currency || 'local currency code'}","starting":null,"typicalTop":null,"note":""},"strengths":[],"watchouts":[]},"performance":{"summary":"","metrics":[{"label":"","value":""}],"points":[]},"trims":[{"name":"","priceFrom":null,"highlights":[]}],"exteriorColours":[{"name":"","swatch":"#888888"}],"interiors":[],"options":[{"name":"","note":"","description":""}],"sentiment":{"score":null,"distribution":{"positive":0,"neutral":0,"negative":0},"sources":[{"type":"Social media","score":null,"volume":"","themes":[]},{"type":"Owner forums","score":null,"volume":"","themes":[]},{"type":"Long-term owner reviews","score":null,"volume":"","themes":[]}],"loves":[],"complaints":[],"note":""},"similar":[{"make":"","model":"","category":"","priceFrom":null,"currency":"${market.currency || 'local currency code'}","sentimentScore":null,"whyConsider":[],"keyDifference":""}],"commonIssues":[{"title":"","severity":"medium","frequency":"","yearsAffected":"","symptoms":[],"description":""}],"generatedProfile":{"primaryUse":"","passengers":"","cargo":[],"terrain":[],"bodyStyles":[],"fuel":"","features":[],"budget":"","priorities":{},"prioritiesMentioned":[]},"profileAssumptions":[],"confidence":{"level":"high|medium|low","notes":""}}`,
   };
 }
 
-function budgetLabel(v, currency = '$') {
+function budgetLabel(v, currencyCode = '') {
   if (!v) return '';
-  if (v < 15000) return `Under ${currency}15,000`;
-  if (v <= 25000) return `${currency}15,000 – ${currency}25,000`;
-  if (v <= 35000) return `${currency}25,000 – ${currency}35,000`;
-  if (v <= 50000) return `${currency}35,000 – ${currency}50,000`;
-  if (v <= 75000) return `${currency}50,000 – ${currency}75,000`;
-  return `${currency}75,000+`;
+  const f = (n) => {
+    try { return new Intl.NumberFormat('en', { style: 'currency', currency: currencyCode, maximumFractionDigits: 0 }).format(n); }
+    catch { return `${currencyCode ? `${currencyCode} ` : ''}${n.toLocaleString()}`; }
+  };
+  if (v < 15000) return `Under ${f(15000)}`;
+  if (v <= 25000) return `${f(15000)} – ${f(25000)}`;
+  if (v <= 35000) return `${f(25000)} – ${f(35000)}`;
+  if (v <= 50000) return `${f(35000)} – ${f(50000)}`;
+  if (v <= 75000) return `${f(50000)} – ${f(75000)}`;
+  return `${f(75000)}+`;
 }
 function fuelFromPowertrains(powertrains) {
   const p = (powertrains || []).join(' ').toLowerCase();
@@ -234,7 +283,8 @@ function fuelFromPowertrains(powertrains) {
   return 'Petrol / Gasoline';
 }
 
-function sanitiseAnalysis(raw, { query, sources, groundingMode, provider, warnings }) {
+function sanitiseAnalysis(raw, { query, sources, groundingMode, provider, warnings, market: marketInput }) {
+  const market = normalizeMarket(marketInput);
   if (!raw || typeof raw !== 'object' || !raw.vehicle) throw Object.assign(new Error('LLM returned an unexpected vehicle-analysis format.'), { status: 502 });
   const v = raw.vehicle;
   const noCites = (s) => s.replace(/\s*\[S\d+\]/gi, '').trim();
@@ -247,7 +297,7 @@ function sanitiseAnalysis(raw, { query, sources, groundingMode, provider, warnin
     drivetrains: arr(v.drivetrains, 4).map((x) => str(x, 60)).filter(Boolean),
     economy: str(v.economy, 300),
     priceGuide: {
-      currency: str(v.priceGuide?.currency, 3).toUpperCase() || 'USD',
+      currency: str(v.priceGuide?.currency, 3).toUpperCase() || market.currency || '',
       starting: num(v.priceGuide?.starting), typicalTop: num(v.priceGuide?.typicalTop),
       note: str(v.priceGuide?.note, 300) || 'Indicative pricing from the cited sources; verify locally.',
     },
@@ -310,7 +360,7 @@ function sanitiseAnalysis(raw, { query, sources, groundingMode, provider, warnin
     else if (/gasoline|petrol|^gas$/.test(f)) generatedProfile.fuel = 'Petrol / Gasoline';
     else if (/diesel/.test(f)) generatedProfile.fuel = 'Diesel';
   }
-  if (!generatedProfile.budget && vehicle.priceGuide.starting) generatedProfile.budget = budgetLabel(vehicle.priceGuide.starting, vehicle.priceGuide.currency === 'USD' ? '$' : `${vehicle.priceGuide.currency} `);
+  if (!generatedProfile.budget && vehicle.priceGuide.starting) generatedProfile.budget = budgetLabel(vehicle.priceGuide.starting, vehicle.priceGuide.currency);
   if (!generatedProfile.prioritiesMentioned.length) generatedProfile.prioritiesMentioned = Object.keys(generatedProfile.priorities);
 
   const profileAssumptions = arr(raw.profileAssumptions, 7).map((x) => str(x, 260)).filter(Boolean);
@@ -394,27 +444,30 @@ function extractNativeSources(raw, parsed) {
   return out;
 }
 
-async function fullGroundedAnalysis(query, { callLLM }) {
+async function fullGroundedAnalysis(query, { callLLM, market: marketInput } = {}) {
+  const market = normalizeMarket(marketInput);
   const today = new Date().toISOString().slice(0, 10);
-  const { provider, sources, warnings, searchQueries } = await retrieveSources(query);
+  const { provider, sources, warnings, searchQueries } = await retrieveSources(query, { market });
   let raw; let groundingMode = 'search+llm'; let usedSources = sources;
 
   if (sources.length) {
-    const prompt = synthesisPrompt(query, sources, today);
+    const prompt = synthesisPrompt(query, sources, today, market);
     const { text } = await callLLM({
+      task: 'vehicle-synthesis',
       messages: [{ role: 'system', content: prompt.system }, { role: 'user', content: prompt.user }],
       maxTokens: Number(process.env.VEHICLE_MAX_TOKENS || 12000), temperature: 0.2,
       timeoutMs: Number(process.env.VEHICLE_LLM_TIMEOUT_MS || 180000),
-      reasoningEffort: process.env.VEHICLE_REASONING_EFFORT ?? 'medium',
+      reasoningEffort: process.env.VEHICLE_REASONING_EFFORT ?? 'low',
     });
     raw = parseJson(text);
     if (!raw) {
       // One strict retry with a reduced source set — long grounded prompts
       // occasionally come back as prose or truncated JSON.
       const retry = await callLLM({
+        task: 'vehicle-synthesis',
         messages: [
-          { role: 'system', content: synthesisPrompt(query, sources.slice(0, 10), today).system },
-          { role: 'user', content: synthesisPrompt(query, sources.slice(0, 10), today).user },
+          { role: 'system', content: synthesisPrompt(query, sources.slice(0, 10), today, market).system },
+          { role: 'user', content: synthesisPrompt(query, sources.slice(0, 10), today, market).user },
         ],
         maxTokens: Number(process.env.VEHICLE_MAX_TOKENS || 12000), temperature: 0.1,
         timeoutMs: Number(process.env.VEHICLE_LLM_TIMEOUT_MS || 180000),
@@ -429,13 +482,14 @@ async function fullGroundedAnalysis(query, { callLLM }) {
     // Responses API). Tool name is configurable because providers differ.
     const toolType = process.env.LLM_WEB_SEARCH_TOOL || 'web_search';
     const result = await callLLM({
+      task: 'vehicle-synthesis',
       messages: [
-        { role: 'system', content: synthesisPrompt(query, [], today).system },
-        { role: 'user', content: `Vehicle requested: "${query}". Use your web-search grounding to research current trims, colours, options, pricing, performance and owner sentiment, then return the same JSON schema described in the system prompt.` },
+        { role: 'system', content: synthesisPrompt(query, [], today, market).system },
+        { role: 'user', content: `Vehicle requested: "${query}" for the ${market.country} market (${market.currency}). Use your web-search grounding to research current ${market.country} trims, colours, options, pricing, performance and owner sentiment, then return the same JSON schema described in the system prompt.` },
       ],
       maxTokens: Number(process.env.VEHICLE_MAX_TOKENS || 12000), temperature: 0.2,
       timeoutMs: Number(process.env.VEHICLE_LLM_TIMEOUT_MS || 180000),
-      reasoningEffort: process.env.VEHICLE_REASONING_EFFORT ?? 'medium',
+      reasoningEffort: process.env.VEHICLE_REASONING_EFFORT ?? 'low',
       tools: [{ type: toolType }],
     });
     raw = parseJson(result.text);
@@ -446,13 +500,14 @@ async function fullGroundedAnalysis(query, { callLLM }) {
     throw Object.assign(new Error(`Search grounding could not retrieve any sources for "${query}" (${(warnings || []).join('; ') || 'no search provider available'}). Configure a search API key (SEARCH_PROVIDER/SEARCH_API_KEY) or enable LLM_NATIVE_GROUNDING=true.`), { status: 503 });
   }
 
-  if (groundingMode === 'search+llm') raw = await repairMissingSections(raw, { query, sources: usedSources, callLLM, today });
-  const value = sanitiseAnalysis(raw, { query, sources: usedSources, groundingMode, provider, warnings: [...(warnings || []), ...(searchQueries ? [] : [])] });
+  if (groundingMode === 'search+llm') raw = await repairMissingSections(raw, { query, sources: usedSources, callLLM, today, market });
+  const value = sanitiseAnalysis(raw, { query, sources: usedSources, groundingMode, provider, warnings: [...(warnings || []), ...(searchQueries ? [] : [])], market });
+  value.market = market;
   // Persist the stable facts (not pricing/sentiment/common issues) for
   // ~monthly reuse, then report the split to the UI.
   let stableStored = false;
   try {
-    const entry = storeStableFacts(value, query);
+    const entry = storeStableFacts(value, query, market);
     stableStored = !!entry;
     if (entry) value.cache = { stableHit: false, stableStored: true, stableCachedAt: new Date(entry.storedAt).toISOString(), stableExpiresAt: new Date(entry.expiresAt).toISOString(), liveRetrievedAt: value.grounding.retrievedAt };
   } catch (err) { console.warn('Could not store stable vehicle cache:', err.message); }
@@ -464,17 +519,18 @@ async function fullGroundedAnalysis(query, { callLLM }) {
 function buildStableEntry(analysis) {
   const clone = JSON.parse(JSON.stringify(analysis));
   const stable = {
-    vehicle: { ...clone.vehicle, priceGuide: { currency: clone.vehicle.priceGuide?.currency || 'USD', starting: null, typicalTop: null, note: 'Pricing is fetched live on each visit.' }, watchouts: [] },
+    vehicle: { ...clone.vehicle, priceGuide: { currency: clone.vehicle.priceGuide?.currency || '', starting: null, typicalTop: null, note: 'Pricing is fetched live on each visit.' }, watchouts: [] },
     performance: clone.performance, trims: clone.trims.map((t) => ({ ...t, priceFrom: null })),
     exteriorColours: clone.exteriorColours, interiors: clone.interiors, options: clone.options,
-    similar: clone.similar.map((s) => ({ ...s, priceGuide: { currency: s.priceGuide?.currency || clone.vehicle.priceGuide?.currency || 'USD', starting: null }, sentimentScore: null })),
+    similar: clone.similar.map((s) => ({ ...s, priceGuide: { currency: s.priceGuide?.currency || clone.vehicle.priceGuide?.currency || '', starting: null }, sentimentScore: null })),
     generatedProfile: { ...clone.generatedProfile, budget: '' },
     profileAssumptions: clone.profileAssumptions,
   };
   const stableSources = clone.sources.filter((s) => ['official-trims', 'colours-options', 'performance', 'similar', 'native-citation'].includes(s.queryType));
   return { stable, sources: stableSources };
 }
-function storeStableFacts(analysis, query) {
+function storeStableFacts(analysis, query, marketInput) {
+  const market = normalizeMarket(marketInput || analysis.market);
   const { stable, sources } = buildStableEntry(analysis);
   // Quality gate: never lock a sparse extraction into the monthly cache.
   // A thin result is returned to the user (honestly labelled) but the next
@@ -482,28 +538,30 @@ function storeStableFacts(analysis, query) {
   const stableItems = stable.trims.length + stable.exteriorColours.length + stable.options.length;
   const meaningful = (stable.trims.length >= 3 && stableItems >= 6) || stableItems >= 10;
   if (!meaningful) { console.log(`Stable cache skipped for ${analysis.vehicle.make} ${analysis.vehicle.model}: only ${stableItems} stable fact item(s) grounded.`); return null; }
-  return vehicleCache.upsert({ vehicle: analysis.vehicle, stable, sources, alias: query });
+  return vehicleCache.upsert({ vehicle: analysis.vehicle, stable, sources, alias: query, marketCode: market.code });
 }
 
-async function liveVariableUpdate(entry, query, { callLLM }) {
+async function liveVariableUpdate(entry, query, { callLLM, market: marketInput } = {}) {
+  const market = normalizeMarket(marketInput || entry.market);
   const today = new Date().toISOString().slice(0, 10);
   const stable = JSON.parse(JSON.stringify(entry.stable));
   const stableSources = entry.sources || [];
   let live = { priceGuide: null, sentiment: null, commonIssues: [], watchouts: [], similarUpdates: [], confidence: null };
   let liveSources = []; let provider = null; let liveError = '';
   try {
-    const retrieved = await retrieveSources(query, { mode: 'live', idOffset: stableSources.length });
+    const retrieved = await retrieveSources(query, { mode: 'live', idOffset: stableSources.length, market });
     provider = retrieved.provider; liveSources = retrieved.sources;
     if (!liveSources.length) throw new Error(retrieved.warnings?.join('; ') || 'No live sources retrieved');
     const sourceText = liveSources.map((s) => `[${s.id}] (${s.queryType}) ${s.title} — ${s.domain}\nURL: ${s.url}\n${String(s.snippet || '').slice(0, 2200)}`).join('\n\n');
     const { text } = await callLLM({
+      task: 'vehicle-live',
       messages: [
-        { role: 'system', content: `You are DriveMatch's grounded vehicle-research analyst. Today is ${today}. The stable facts for this vehicle (trims, colours, options, specs) are already cached — do NOT redo them. Using ONLY the web sources provided, return the VARIABLE sections that change over time: current indicative pricing, owner sentiment, common owner-reported issues, and current watch-outs. Never invent facts; use null/empty where sources are insufficient. For sentiment, estimate a score/distribution only if sources contain ratings or substantive owner-review text, noting it is an estimate from these sources. For common issues, judge severity by safety/cost impact in the sources and frequency only as it appears in these sources. Return ONLY valid JSON: {"priceGuide":{"currency":"USD","starting":null,"typicalTop":null,"note":""},"sentiment":{"score":null,"distribution":{"positive":0,"neutral":0,"negative":0},"sources":[],"loves":[],"complaints":[],"note":""},"commonIssues":[{"title":"","severity":"medium","frequency":"","yearsAffected":"","symptoms":[],"description":""}],"watchouts":[],"similarUpdates":[{"make":"","model":"","priceFrom":null,"currency":"USD","sentimentScore":null}],"confidence":{"level":"high|medium|low","notes":""}}` },
-        { role: 'user', content: `Vehicle: "${entry.make} ${entry.model} ${entry.year || ''}" (cached stable facts as of ${new Date(entry.storedAt).toISOString().slice(0, 10)}). Return the variable sections from these fresh sources:\n\n${sourceText}` },
+        { role: 'system', content: `You are DriveMatch's grounded vehicle-research analyst. Today is ${today}. TARGET MARKET: ${market.country} (${market.code}) — pricing must be ${market.currency} from ${market.country} sources; never convert currencies. The stable facts for this vehicle (trims, colours, options, specs) are already cached — do NOT redo them. Using ONLY the web sources provided, return the VARIABLE sections that change over time: current indicative pricing, owner sentiment, common owner-reported issues, and current watch-outs. Never invent facts; use null/empty where sources are insufficient. For sentiment, estimate a score/distribution only if sources contain ratings or substantive owner-review text, noting it is an estimate from these sources. For common issues, judge severity by safety/cost impact in the sources and frequency only as it appears in these sources. Return ONLY valid JSON: {"priceGuide":{"currency":"${market.currency}","starting":null,"typicalTop":null,"note":""},"sentiment":{"score":null,"distribution":{"positive":0,"neutral":0,"negative":0},"sources":[],"loves":[],"complaints":[],"note":""},"commonIssues":[{"title":"","severity":"medium","frequency":"","yearsAffected":"","symptoms":[],"description":""}],"watchouts":[],"similarUpdates":[{"make":"","model":"","priceFrom":null,"currency":"${market.currency}","sentimentScore":null}],"confidence":{"level":"high|medium|low","notes":""}}` },
+        { role: 'user', content: `Vehicle: "${entry.make} ${entry.model} ${entry.year || ''}" for ${market.country} (cached stable facts as of ${new Date(entry.storedAt).toISOString().slice(0, 10)}). Return the variable sections from these fresh sources:\n\n${sourceText}` },
       ],
       maxTokens: Number(process.env.VEHICLE_LIVE_MAX_TOKENS || 5000), temperature: 0.2,
       timeoutMs: Number(process.env.VEHICLE_LLM_TIMEOUT_MS || 180000),
-      reasoningEffort: process.env.VEHICLE_REASONING_EFFORT ?? 'medium',
+      reasoningEffort: process.env.VEHICLE_REASONING_EFFORT ?? 'low',
     });
     const rawLive = parseJson(text) || {};
     live = {
@@ -518,7 +576,7 @@ async function liveVariableUpdate(entry, query, { callLLM }) {
 
   const vehicle = { ...stable.vehicle };
   if (live.priceGuide?.starting || live.priceGuide?.note) {
-    vehicle.priceGuide = { currency: str(live.priceGuide.currency, 3).toUpperCase() || vehicle.priceGuide.currency || 'USD', starting: num(live.priceGuide.starting), typicalTop: num(live.priceGuide.typicalTop), note: str(live.priceGuide.note, 300) || 'Live pricing from the cited sources; verify locally.' };
+    vehicle.priceGuide = { currency: str(live.priceGuide.currency, 3).toUpperCase() || vehicle.priceGuide.currency || market.currency || '', starting: num(live.priceGuide.starting), typicalTop: num(live.priceGuide.typicalTop), note: str(live.priceGuide.note, 300) || 'Live pricing from the cited sources; verify locally.' };
   }
   if (live.watchouts.length) vehicle.watchouts = live.watchouts;
   const similar = (stable.similar || []).map((s) => {
@@ -527,10 +585,10 @@ async function liveVariableUpdate(entry, query, { callLLM }) {
     return { ...s, priceGuide: { currency: str(upd.currency, 3).toUpperCase() || s.priceGuide.currency, starting: num(upd.priceFrom) }, sentimentScore: num(upd.sentimentScore) === null ? null : clamp(Math.round(num(upd.sentimentScore)), 0, 100) };
   });
   const generatedProfile = { ...(stable.generatedProfile || {}) };
-  if (!generatedProfile.budget && vehicle.priceGuide?.starting) generatedProfile.budget = budgetLabel(vehicle.priceGuide.starting, vehicle.priceGuide.currency === 'USD' ? '$' : `${vehicle.priceGuide.currency} `);
+  if (!generatedProfile.budget && vehicle.priceGuide?.starting) generatedProfile.budget = budgetLabel(vehicle.priceGuide.starting, vehicle.priceGuide.currency);
 
   return {
-    query, generic: false, grounded: true, asOf: today,
+    query, generic: false, grounded: true, asOf: today, market,
     dataSource: `Stable vehicle facts (trims, colours, options, specs) come from the backend cache DB, stored ${new Date(entry.storedAt).toISOString().slice(0, 10)} and refreshed monthly. Pricing, sentiment and common issues below were pulled live on ${today} from ${liveSources.length} fresh source(s)${liveError ? ` — live update note: ${liveError}; variable sections may be incomplete` : ''}. Verify prices/specs locally before buying.`,
     grounding: { mode: 'stable-cache+live', provider, retrievedAt: new Date().toISOString(), sourceCount: stableSources.length + liveSources.length, warnings: liveError ? [liveError] : [] },
     sources: [...stableSources, ...liveSources.map((s) => ({ id: s.id, title: s.title, url: s.url, domain: s.domain, publishedDate: s.publishedDate || '', queryType: s.queryType }))],
@@ -542,18 +600,19 @@ async function liveVariableUpdate(entry, query, { callLLM }) {
   };
 }
 
-async function analyseVehicleGrounded(query, { callLLM, refreshStable = false } = {}) {
-  const key = query.toLowerCase().replace(/\s+/g, ' ').trim();
+async function analyseVehicleGrounded(query, { callLLM, refreshStable = false, market: marketInput } = {}) {
+  const market = normalizeMarket(marketInput);
+  const key = `${market.code}|${query.toLowerCase().replace(/\s+/g, ' ').trim()}`;
   if (inFlight.has(key)) return inFlight.get(key);
   const run = (async () => {
     if (!refreshStable) {
       try {
-        const entry = vehicleCache.findByQuery(query);
-        if (entry?.fresh) { vehicleCache.recordHit(entry); return await liveVariableUpdate(entry, query, { callLLM }); }
-        if (entry && !entry.fresh) console.log(`Vehicle stable cache expired for ${entry.make} ${entry.model} — refreshing (monthly update).`);
+        const entry = vehicleCache.findByQuery(query, market.code);
+        if (entry?.fresh) { vehicleCache.recordHit(entry); return await liveVariableUpdate(entry, query, { callLLM, market }); }
+        if (entry && !entry.fresh) console.log(`Vehicle stable cache expired for ${entry.make} ${entry.model} (${market.code}) — refreshing (monthly update).`);
       } catch (err) { console.warn('Vehicle cache lookup failed, doing full analysis:', err.message); }
     }
-    return fullGroundedAnalysis(query, { callLLM });
+    return fullGroundedAnalysis(query, { callLLM, market });
   })();
   inFlight.set(key, run);
   try { return await run; } finally { inFlight.delete(key); }
@@ -563,7 +622,8 @@ async function analyseVehicleGrounded(query, { callLLM, refreshStable = false } 
 // (trims, colours, sentiment score, rivals, price, performance), re-ask with
 // only the sources relevant to the missing sections and merge what it finds.
 // Still sources-only — this improves completeness, never invents data.
-async function repairMissingSections(raw, { query, sources, callLLM, today }) {
+async function repairMissingSections(raw, { query, sources, callLLM, today, market: marketInput }) {
+  const market = normalizeMarket(marketInput);
   if (!raw || typeof raw !== 'object') return raw;
   const missing = [];
   if (!arr(raw.trims).length) missing.push('trims');
@@ -599,13 +659,14 @@ async function repairMissingSections(raw, { query, sources, callLLM, today }) {
   const sourceText = focused.map((s) => `[${s.id}] (${s.queryType}) ${s.title} — ${s.domain}\nURL: ${s.url}\n${String(s.snippet || '').slice(0, 3400)}`).join('\n\n');
   try {
     const { text } = await callLLM({
+      task: 'vehicle-repair',
       messages: [
-        { role: 'system', content: `You are DriveMatch's grounded vehicle-research analyst. Today is ${today}. Using ONLY the web sources provided, fill in these missing sections for a vehicle analysis: ${missing.join(', ')}. Never invent facts; if a section still cannot be supported, leave it empty/null. For sentiment, estimate a score/distribution only if the sources contain ratings or substantive owner-review text, and note that it is an estimate from the retrieved sources. Return ONLY valid JSON with the same field names as a full vehicle analysis (vehicle, performance, trims, exteriorColours, options, sentiment, similar) — include only the sections you can support.` },
-        { role: 'user', content: `Vehicle: "${query}"\nMissing sections: ${missing.join(', ')}\n\nWEB SOURCES:\n${sourceText}` },
+        { role: 'system', content: `You are DriveMatch's grounded vehicle-research analyst. Today is ${today}. TARGET MARKET: ${market.country} (${market.currency}) — pricing must come from ${market.country} sources in ${market.currency}; never convert currencies. Using ONLY the web sources provided, fill in these missing sections for a vehicle analysis: ${missing.join(', ')}. Never invent facts; if a section still cannot be supported, leave it empty/null. For sentiment, estimate a score/distribution only if the sources contain ratings or substantive owner-review text, and note that it is an estimate from the retrieved sources. Return ONLY valid JSON with the same field names as a full vehicle analysis (vehicle, performance, trims, exteriorColours, options, sentiment, similar) — include only the sections you can support.` },
+        { role: 'user', content: `Vehicle: "${query}" for ${market.country}\nMissing sections: ${missing.join(', ')}\n\nWEB SOURCES:\n${sourceText}` },
       ],
       maxTokens: Number(process.env.VEHICLE_MAX_TOKENS || 12000), temperature: 0.2,
       timeoutMs: Number(process.env.VEHICLE_LLM_TIMEOUT_MS || 180000),
-      reasoningEffort: process.env.VEHICLE_REASONING_EFFORT ?? 'medium',
+      reasoningEffort: process.env.VEHICLE_REASONING_EFFORT ?? 'low',
     });
     const fix = parseJson(text);
     if (!fix) return raw;
@@ -621,6 +682,187 @@ async function repairMissingSections(raw, { query, sources, callLLM, today }) {
   } catch { return raw; /* repair is best-effort; the honest first pass stands */ }
 }
 
+// ---------------- Profile-based vehicle suggestions ----------------
+const suggestionCache = new Map(); // profileHash -> { at, value } (15 min, in-memory)
+const SUGGESTION_TTL_MS = 15 * 60 * 1000;
+
+function parseBudgetRange(text) {
+  const amounts = [...String(text || '').replace(/,/g, '').matchAll(/(?:^|\D)(\d{4,7})(?:\D|$)/g)]
+    .map((m) => Number(m[1])).filter((n) => n >= 3000 && n <= 500000);
+  if (!amounts.length) return null;
+  return { min: Math.min(...amounts), max: Math.max(...amounts) };
+}
+function profilePriorityMap(profile) {
+  const out = {};
+  const aliases = { economy: 'fuelEconomy', fuel: 'fuelEconomy', tech: 'technology', space: 'comfort', practicality: 'cargo', looks: 'style', design: 'style', power: 'performance', speed: 'performance' };
+  for (const [k, v] of Object.entries(profile?.priorities || {})) out[aliases[String(k).toLowerCase()] || k] = clamp(Number(v) || 0, 0, 5);
+  return out;
+}
+function sanitiseCandidate(c, market) {
+  if (!c || typeof c !== 'object') return null;
+  const make = str(c.make, 60); const model = str(c.model, 80);
+  if (!make || !model) return null;
+  const priorityFit = {};
+  if (c.priorityFit && typeof c.priorityFit === 'object') {
+    const aliases = { economy: 'fuelEconomy', fuel: 'fuelEconomy', tech: 'technology', space: 'comfort', practicality: 'cargo', looks: 'style', design: 'style', power: 'performance', speed: 'performance' };
+    for (const [k, v] of Object.entries(c.priorityFit)) priorityFit[aliases[String(k).toLowerCase()] || k] = clamp(Number(v) || 0, 0, 5);
+  }
+  return {
+    make, model, year: str(c.year, 40),
+    category: str(c.category, 80), bodyStyle: str(c.bodyStyle, 60),
+    fuel: str(c.fuel, 60), seating: clamp(Number(c.seating) || 5, 1, 12),
+    priceGuide: {
+      currency: str(c.priceGuide?.currency, 3).toUpperCase() || market.currency || '',
+      starting: num(c.priceGuide?.starting), typicalTop: num(c.priceGuide?.typicalTop),
+      note: str(c.priceGuide?.note, 260),
+    },
+    strengths: arr(c.strengths, 5).map((x) => str(x, 160)).filter(Boolean),
+    tradeoffs: arr(c.tradeoffs, 4).map((x) => str(x, 160)).filter(Boolean),
+    features: arr(c.features, 8).map((x) => str(x, 100)).filter(Boolean),
+    priorityFit,
+    llmSuitability: num(c.suitabilityScore) === null ? null : clamp(Math.round(num(c.suitabilityScore)), 0, 100),
+  };
+}
+function scoreCandidate(candidate, profile) {
+  const reasons = [];
+  let score = (candidate.llmSuitability ?? 55) * 0.35;
+  const bodies = (profile.bodyStyles || []).map((x) => String(x).toLowerCase());
+  const candBody = candidate.bodyStyle.toLowerCase();
+  if (bodies.some((b) => candBody && (b.includes(candBody) || candBody.includes(b)))) { score += 15; reasons.push(`matches your preferred ${candidate.bodyStyle} body style`); }
+  const profileFuel = String(profile.fuel || '').toLowerCase();
+  const candFuel = candidate.fuel.toLowerCase();
+  if (profileFuel && candFuel && (candFuel.includes(profileFuel.split(' ')[0]) || profileFuel.includes(candFuel.split(' ')[0]))) { score += 12; reasons.push(`fits your ${candidate.fuel} preference`); }
+  if (profile.primaryUse && `${candidate.category} ${candidate.strengths.join(' ')}`.toLowerCase().includes(String(profile.primaryUse).toLowerCase().split(' ')[0])) { score += 8; reasons.push(`suits your main use (${profile.primaryUse.toLowerCase()})`); }
+  const budget = parseBudgetRange(profile.budget);
+  const price = candidate.priceGuide.starting;
+  if (budget && price) {
+    if (price >= budget.min * 0.7 && price <= budget.max) { score += 15; reasons.push(`starting price sits inside your budget (${profile.budget})`); }
+    else if (price <= budget.max * 1.1) { score += 7; reasons.push('starting price is close to your budget — watch trim creep'); }
+    else if (price > budget.max * 1.25) { score -= 15; }
+    else { score += 5; reasons.push('starting price comes in under your budget'); }
+  }
+  const wantedFeatures = (profile.features || []).map((x) => String(x).toLowerCase());
+  const covered = candidate.features.filter((f) => wantedFeatures.some((w) => f.toLowerCase().includes(w) || w.includes(f.toLowerCase())));
+  if (covered.length) { score += Math.min(10, covered.length * 3); reasons.push(`offers your must-haves: ${covered.slice(0, 3).join(', ')}`); }
+  const priorities = profilePriorityMap(profile);
+  const weighted = Object.entries(priorities).filter(([, v]) => v > 0);
+  if (weighted.length && Object.keys(candidate.priorityFit).length) {
+    const avg = weighted.reduce((acc, [k, v]) => acc + (candidate.priorityFit[k] || 3) * v, 0) / weighted.reduce((acc, [, v]) => acc + v, 0);
+    score += (avg / 5) * 12;
+    const top = weighted.sort((a, b) => b[1] - a[1]).slice(0, 2).map(([k]) => k);
+    reasons.push(`scores well on what you ranked highest (${top.join(' and ')})`);
+  }
+  if (profile.interestedVehicle && `${candidate.make} ${candidate.model}`.toLowerCase() === String(profile.interestedVehicle).toLowerCase()) { score += 8; reasons.push('this is the vehicle you told Maya you are already eyeing'); }
+  if (!reasons.length && candidate.strengths.length) reasons.push(candidate.strengths[0].toLowerCase());
+  const matchScore = clamp(Math.round(score), 5, 98);
+  const tradeoffText = candidate.tradeoffs.length ? ` Trade-off to weigh: ${candidate.tradeoffs[0]}` : '';
+  return {
+    ...candidate, matchScore, reasons: [...new Set(reasons)].slice(0, 4),
+    whySummary: `Chosen because it ${reasons.slice(0, 3).join(', ') || 'aligns with your profile'}.${tradeoffText}`,
+  };
+}
+
+async function suggestVehiclesForProfile({ profile = {}, guidelines = [], market: marketInput, callLLM } = {}) {
+  const market = normalizeMarket(marketInput);
+  const guidelinesText = JSON.stringify(guidelines || []).slice(0, 4000);
+  const cacheKey = JSON.stringify({ p: profile, g: guidelinesText, m: market.code, c: market.currency });
+  const hit = suggestionCache.get(cacheKey);
+  if (hit && Date.now() - hit.at < SUGGESTION_TTL_MS) return { ...hit.value, cached: true };
+
+  const today = new Date().toISOString().slice(0, 10);
+  const bodies = (profile.bodyStyles || []).join(' / ') || 'vehicles';
+  const priorities = Object.entries(profilePriorityMap(profile)).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k]) => k).join(', ');
+  const place = market.country || 'the user\'s market';
+  const searches = [
+    { type: 'best-matches', query: `best ${bodies} ${profile.fuel || ''} vehicles ${place} ${profile.budget || ''} for ${profile.primaryUse || 'everyday driving'} top picks` },
+    { type: 'comparisons', query: `best ${bodies} comparison ${priorities || 'safety reliability'} top rated vehicles ${place}` },
+    { type: 'market-pricing', query: `${bodies} prices ${market.currency || ''} ${place} best value ${profile.condition || ''} vehicles` },
+    { type: 'use-case', query: `best vehicle for ${profile.primaryUse || 'family'} ${profile.passengers ? `${profile.passengers} passengers` : ''} ${(profile.cargo || []).join(' ')} ${place}` },
+  ];
+  const { provider, sources, warnings } = await runSearches(searches);
+  if (!sources.length) throw Object.assign(new Error(`Vehicle suggestions could not retrieve any sources (${(warnings || []).join('; ') || 'no search provider available'}).`), { status: 503 });
+  const sourceText = sources.map((s) => `[${s.id}] (${s.queryType}) ${s.title} — ${s.domain}\nURL: ${s.url}\n${String(s.snippet || '').slice(0, 2000)}`).join('\n\n');
+  const { text } = await callLLM({
+    task: 'vehicle-suggestions',
+    messages: [
+      { role: 'system', content: `You are DriveMatch's grounded vehicle-matching analyst. Today is ${today}. Using ONLY the web sources provided, propose up to 6 real candidate vehicles that fit the driver's profile for ${place}${market.currency ? `, priced in ${market.currency} from ${place} sources (never convert currencies)` : ''}. Every candidate must be a specific make/model supported by the sources. Never invent prices or features. Return ONLY valid JSON: {"candidates":[{"make":"","model":"","year":"","category":"","bodyStyle":"","fuel":"","seating":5,"priceGuide":{"currency":"${market.currency || ''}","starting":null,"typicalTop":null,"note":""},"strengths":[],"tradeoffs":[],"features":[],"priorityFit":{"safety":0,"reliability":0,"fuelEconomy":0,"performance":0,"comfort":0,"technology":0,"cargo":0,"style":0},"suitabilityScore":0}]}` },
+      { role: 'user', content: `DRIVER PROFILE (JSON): ${JSON.stringify(profile)}\n\nUSER'S CONFIRMED VEHICLE-SELECTION GUIDELINES (treat as their criteria; the profile above is the structured summary of the same): ${guidelinesText || '(none provided)'}\n\nWEB SOURCES:\n${sourceText}` },
+    ],
+    maxTokens: Number(process.env.VEHICLE_SUGGESTION_MAX_TOKENS || 6000), temperature: 0.2,
+    timeoutMs: Number(process.env.VEHICLE_LLM_TIMEOUT_MS || 180000),
+    reasoningEffort: process.env.VEHICLE_REASONING_EFFORT ?? 'low',
+  });
+  const parsed = parseJson(text);
+  const rawCandidates = arr(parsed?.candidates, 6).map((c) => sanitiseCandidate(c, market)).filter(Boolean);
+  const deduped = [...new Map(rawCandidates.map((c) => [`${c.make} ${c.model}`.toLowerCase(), c])).values()];
+  const ranked = deduped.map((c) => scoreCandidate(c, profile)).sort((a, b) => b.matchScore - a.matchScore).slice(0, 3);
+  if (!ranked.length) throw Object.assign(new Error('The grounded sources did not support any confident vehicle suggestions for this profile yet.'), { status: 502 });
+  const value = {
+    asOf: today, market, profileUsed: profile,
+    dataSource: `Search-grounded suggestions generated ${today} from ${sources.length} web source(s) via ${provider}, ranked against your profile (body style, fuel, budget, must-haves and priorities scored on the server). Prices are indicative — open a vehicle for a full grounded analysis before relying on them.`,
+    sources: sources.map((s) => ({ id: s.id, title: s.title, url: s.url, domain: s.domain, publishedDate: s.publishedDate || '', queryType: s.queryType })),
+    candidates: ranked,
+  };
+  suggestionCache.set(cacheKey, { at: Date.now(), value });
+  return value;
+}
+
+// ---------------- Nearby dealers & offers ----------------
+async function findDealerOffers({ vehicle, location, market: marketInput, callLLM } = {}) {
+  const market = normalizeMarket(marketInput);
+  const vehicleName = str(typeof vehicle === 'string' ? vehicle : `${vehicle?.make || ''} ${vehicle?.model || ''}`, 120).trim();
+  const place = str(location, 120).trim();
+  if (!vehicleName) throw Object.assign(new Error('vehicle is required'), { status: 400 });
+  if (!place) throw Object.assign(new Error('location is required to find nearby dealers'), { status: 400 });
+  const today = new Date().toISOString().slice(0, 10);
+  const make = vehicleName.split(/\s+/)[0];
+  const searches = [
+    { type: 'dealer-offers', query: `${vehicleName} dealer near ${place} offers incentives special offers price` },
+    { type: 'dealer-inventory', query: `${make} dealership ${place} new ${vehicleName} inventory deals` },
+    { type: 'manufacturer-incentives', query: `${vehicleName} current incentives rebates finance offers ${market.country || ''} ${today.slice(0, 7)}` },
+    { type: 'dealer-reviews', query: `best ${make} dealers near ${place} reviews pricing negotiation` },
+  ];
+  const { provider, sources, warnings } = await runSearches(searches);
+  if (!sources.length) throw Object.assign(new Error(`Dealer search could not retrieve any sources (${(warnings || []).join('; ') || 'no search provider available'}).`), { status: 503 });
+  const byId = Object.fromEntries(sources.map((s) => [s.id, s]));
+  const sourceText = sources.map((s) => `[${s.id}] (${s.queryType}) ${s.title} — ${s.domain}\nURL: ${s.url}\n${String(s.snippet || '').slice(0, 2200)}`).join('\n\n');
+  const { text } = await callLLM({
+    task: 'dealer-research',
+    messages: [
+      { role: 'system', content: `You are DriveMatch's grounded dealer-research analyst. Today is ${today}. Using ONLY the web sources provided, extract dealers near the user's location that sell the vehicle, any publicly advertised offers, and an evidence-based estimate of pricing flexibility. Rules: only include dealers/offers actually named in the sources, each with its sourceId; never invent dealer names, distances, prices, discounts or stock — distanceText only if a source states it; an offer only if a source states its terms. Pricing flexibility must be judged ONLY from public signals in the sources (advertised discounts below list price, manufacturer rebates/incentives, clearance/model-year offers, low-rate finance combined with cash offers, multiple competing offers) and labelled an estimate, never a guarantee. Return ONLY valid JSON: {"dealers":[{"name":"","brand":"","area":"","distanceText":"","offerTitle":"","offerDetails":"","priceText":"","sourceId":"S1"}],"flexibility":{"level":"high|medium|low|unknown","rationale":"","signals":[],"confidence":"high|medium|low"},"negotiationTips":[]}` },
+      { role: 'user', content: `Vehicle: ${vehicleName}\nNear: ${place}${market.country ? ` (${market.country})` : ''}\n\nWEB SOURCES:\n${sourceText}` },
+    ],
+    maxTokens: Number(process.env.DEALER_MAX_TOKENS || 5000), temperature: 0.2,
+    timeoutMs: Number(process.env.VEHICLE_LLM_TIMEOUT_MS || 180000),
+    reasoningEffort: process.env.VEHICLE_REASONING_EFFORT ?? 'low',
+  });
+  const parsed = parseJson(text) || {};
+  const dealers = arr(parsed.dealers, 6).map((d) => {
+    const source = byId[str(d.sourceId, 10)];
+    if (!source || !str(d.name, 120)) return null;
+    return {
+      name: str(d.name, 120), brand: str(d.brand, 60), area: str(d.area, 100), distanceText: str(d.distanceText, 60),
+      offerTitle: str(d.offerTitle, 140), offerDetails: str(d.offerDetails, 320), priceText: str(d.priceText, 120),
+      sourceId: source.id, sourceTitle: source.title, url: source.url, domain: source.domain,
+    };
+  }).filter(Boolean);
+  const flexRaw = parsed.flexibility || {};
+  const flexibility = {
+    level: ['high', 'medium', 'low'].includes(String(flexRaw.level || '').toLowerCase()) ? String(flexRaw.level).toLowerCase() : 'unknown',
+    rationale: str(flexRaw.rationale, 400) || 'The retrieved public sources did not show enough pricing signals to judge flexibility.',
+    signals: arr(flexRaw.signals, 6).map((x) => str(x, 160)).filter(Boolean),
+    confidence: ['high', 'medium', 'low'].includes(String(flexRaw.confidence || '').toLowerCase()) ? String(flexRaw.confidence).toLowerCase() : 'low',
+    disclaimer: 'Estimate from publicly advertised offers/incentives found today — not inside knowledge of any dealer. Actual flexibility depends on stock, timing and the specific car; always get competing out-the-door quotes.',
+  };
+  return {
+    vehicle: vehicleName, location: place, market, asOf: today,
+    dataSource: `Public web offers/dealer pages retrieved ${today} via ${provider} (${sources.length} source(s)). This is not a live inventory feed — dealers, stock and offers change; verify everything with the dealer.`,
+    dealers, flexibility,
+    negotiationTips: arr(parsed.negotiationTips, 4).map((x) => str(x, 200)).filter(Boolean),
+    sources: sources.map((s) => ({ id: s.id, title: s.title, url: s.url, domain: s.domain, publishedDate: s.publishedDate || '', queryType: s.queryType })),
+  };
+}
+
 function parseJson(content) {
   try {
     const cleaned = String(content || '').replace(/```(?:json)?/gi, '').trim();
@@ -630,4 +872,4 @@ function parseJson(content) {
   } catch { return null; }
 }
 
-module.exports = { analyseVehicleGrounded, retrieveSources, buildSearchQueries, buildStableEntry, sanitiseCommonIssues, sanitiseSentiment };
+module.exports = { analyseVehicleGrounded, retrieveSources, buildSearchQueries, buildStableEntry, sanitiseCommonIssues, sanitiseSentiment, normalizeMarket, suggestVehiclesForProfile, findDealerOffers, scoreCandidate, parseBudgetRange };

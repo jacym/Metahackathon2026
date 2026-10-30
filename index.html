@@ -46,6 +46,7 @@
       <div class="hero-ctas">
         <button class="btn btn-primary btn-lg" data-start>Start Chatting With Your Agent →</button>
         <a class="btn btn-outline btn-lg" href="#how">See how it works</a>
+        <button class="btn btn-ghost btn-lg" data-upload-guidelines>⬆ Returning? Upload your guidelines</button>
       </div>
 
       <div class="hero-stats">
@@ -127,7 +128,17 @@
 
       <ol class="topic-progress" id="topicProgress" aria-label="Topics covered"></ol>
 
+      <div class="market-row">
+        <label class="field market-field"><span>Market <small style="color:var(--muted);font-weight:400">(auto-detected from chat)</small></span>
+          <select id="marketSelect" aria-label="Choose your market">
+            <option value="">Auto-detect from chat</option>
+          </select>
+        </label>
+        <p class="market-hint" id="marketHint">Tell Maya your country, city or postal code and she will set your market and local currency automatically.</p>
+      </div>
+
       <div class="chat-tools">
+        <button type="button" class="chip tool-chip" data-upload-guidelines>⬆ Returning? Upload guidelines</button>
         <button type="button" class="chip tool-chip" id="analyseVehicleBtn">🔎 Analyse a vehicle</button>
         <button type="button" class="chip tool-chip" id="financeToolBtn" disabled>💰 Financing calculator</button>
         <button type="button" class="chip tool-chip" id="vehicleProfileToolBtn" disabled>✨ Build my profile from this vehicle</button>
@@ -144,7 +155,7 @@
         <textarea id="chatInput" rows="1" placeholder="Type your answer… (Enter to send, Shift+Enter for a new line)" autocomplete="off"></textarea>
         <button type="submit" class="btn btn-primary" id="sendBtn">Send →</button>
       </form>
-      <p class="chat-hint" id="agentHint">Checking whether the DriveMatch backend has Muse Wonder enabled…</p>
+      <p class="chat-hint" id="agentHint">Checking whether the DriveMatch backend has a Muse model enabled…</p>
     </div>
 
     <!-- LIVE PROFILE + GUIDELINES -->
@@ -157,6 +168,15 @@
 
       <div id="personaPanel"></div>
       <div id="profilePanel"><p class="empty-state">Nothing here yet. As you chat, Maya will fill this in — your lifestyle, budget, must-haves, and priorities.</p></div>
+
+      <div id="suggestionsPanel" hidden>
+        <div class="vehicle-panel-head">
+          <h3>🎯 Your Top 3 Vehicle Matches</h3>
+          <span class="pill" id="suggestionsBadge">Profile-based</span>
+        </div>
+        <p class="guidelines-sub" id="suggestionsNote"></p>
+        <div id="suggestionsContent"></div>
+      </div>
 
       <div id="vehiclePanel" hidden>
         <div class="vehicle-panel-head">
@@ -171,12 +191,7 @@
           <p class="guidelines-sub">Estimate only — not financial advice. Enter/adjust local pricing in your chosen currency; figures are not converted between currencies.</p>
           <div class="finance-grid">
             <label class="field"><span>Currency</span>
-              <select id="finCurrency">
-                <option value="USD">USD — US Dollar</option><option value="EUR">EUR — Euro</option><option value="GBP">GBP — British Pound</option>
-                <option value="ZAR">ZAR — South African Rand</option><option value="AUD">AUD — Australian Dollar</option><option value="CAD">CAD — Canadian Dollar</option>
-                <option value="NZD">NZD — New Zealand Dollar</option><option value="JPY">JPY — Japanese Yen</option><option value="CHF">CHF — Swiss Franc</option>
-                <option value="INR">INR — Indian Rupee</option><option value="AED">AED — UAE Dirham</option>
-              </select></label>
+              <select id="finCurrency"><!-- options populated from your detected market / full currency list --></select></label>
             <label class="field"><span>Vehicle price</span><input type="number" id="finPrice" min="0" step="100" inputmode="decimal" /></label>
             <label class="field"><span>Deposit / down payment</span><input type="number" id="finDeposit" min="0" step="100" value="0" inputmode="decimal" /></label>
             <label class="field"><span>Trade-in value</span><input type="number" id="finTradeIn" min="0" step="100" value="0" inputmode="decimal" /></label>
@@ -196,8 +211,11 @@
       </div>
 
       <div class="summary-actions">
-        <button type="button" class="btn btn-primary btn-sm" id="guidelinesBtn">✨ Generate My Guidelines</button>
+        <button type="button" class="btn btn-primary btn-sm" id="suggestBtn">🚗 Suggest 3 Vehicles For Me</button>
+        <button type="button" class="btn btn-outline btn-sm" id="guidelinesBtn">✨ Generate My Guidelines</button>
+        <button type="button" class="btn btn-outline btn-sm" id="pdfBtn">⬇ Guidelines (PDF)</button>
         <button type="button" class="btn btn-outline btn-sm" id="downloadBtn">⬇ Download profile (.json)</button>
+        <button type="button" class="btn btn-outline btn-sm" data-upload-guidelines>⬆ Upload guidelines (.json)</button>
         <button type="button" class="btn btn-ghost btn-sm" id="restartBtn2">Start over</button>
       </div>
     </aside>
@@ -237,12 +255,14 @@
 <footer>
   <div class="footer-inner">
     <a href="#" class="logo light">◈ Drive<span>Match</span></a>
-    <p>DriveMatch is a demo experience built incrementally. Your chat and profile are stored only in your browser (localStorage). Chat messages are processed by the DriveMatch backend; the Muse Wonder API token lives only on the server.</p>
+    <p>DriveMatch is a demo experience built incrementally. Your chat and profile are stored only in your browser (localStorage). Chat messages are processed by the DriveMatch backend; the Muse API token lives only on the server.</p>
     <nav><a href="#how">How it works</a><a href="#vehicles">Vehicle types</a><a href="#agent" data-start>Chat with Maya</a></nav>
     <small>© 2026 DriveMatch — Hackathon build v0.4 (Vehicle Analysis)</small>
   </div>
 </footer>
 
+<input type="file" id="guidelinesUpload" accept="application/json,.json" hidden />
+<div id="printArea" hidden></div>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
 <script src="app.js"></script>

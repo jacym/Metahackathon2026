@@ -17,7 +17,7 @@
 //                        server-side — no preconfigured vehicle database.
 const path = require('path');
 const fs = require('fs');
-const { analyseVehicleGrounded } = require('./vehicleGrounding');
+const { analyseVehicleGrounded, suggestVehiclesForProfile, findDealerOffers } = require('./vehicleGrounding');
 const vehicleCache = require('./vehicleCacheDb');
 
 // Load .env if present (Node 24 built-in, no dotenv dependency needed)
@@ -30,6 +30,63 @@ const LLM_API_KEY = (process.env.LLM_API_KEY || '').trim();
 const LLM_BASE_URL = (process.env.LLM_BASE_URL || '').trim().replace(/\/$/, '');
 const LLM_MODEL = (process.env.LLM_MODEL || 'muse-wonder-1.0').trim();
 const LLM_PROVIDER_MODEL = (process.env.LLM_PROVIDER_MODEL || 'meta/muse-wonder-1.0').trim();
+
+// --- Flexible Muse model support: Wonder + Spark ---
+// Both models are first-class. Every LLM call is tagged with a task;
+// routing decides which model handles it, and a failed/empty call can
+// fall back to the other model once. Configure in .env:
+//   LLM_ROUTING=balanced|wonder|spark|primary
+//     balanced (default): Wonder for deep grounded synthesis/repair,
+//                         Spark for chat, live updates, suggestions, dealers
+//     wonder / spark:     force one model for everything
+//     primary:            use LLM_MODEL for everything
+//   LLM_WONDER_MODEL=muse-wonder-1.0   LLM_SPARK_MODEL=muse-spark-1.3
+//   LLM_FALLBACK_MODEL=true|false      cross-model fallback on failure
+const MODEL_PROFILES = {
+  wonder: {
+    tier: 'wonder', label: 'Muse Wonder',
+    model: (process.env.LLM_WONDER_MODEL || 'muse-wonder-1.0').trim(),
+    strengths: 'Deepest reasoning — grounded synthesis & repair',
+  },
+  spark: {
+    tier: 'spark', label: 'Muse Spark',
+    model: (process.env.LLM_SPARK_MODEL || 'muse-spark-1.3').trim(),
+    strengths: 'Fast & economical — chat, live updates, extraction',
+  },
+};
+for (const p of Object.values(MODEL_PROFILES)) p.providerModel = p.model.startsWith('meta/') ? p.model : `meta/${p.model}`;
+const LLM_ROUTING = (process.env.LLM_ROUTING || 'balanced').toLowerCase();
+const LLM_FALLBACK_ENABLED = (process.env.LLM_FALLBACK_MODEL || 'true').toLowerCase() !== 'false';
+const DEEP_TASKS = new Set(['vehicle-synthesis', 'vehicle-repair']);
+function tierOfModel(model) {
+  const m = String(model || '').toLowerCase();
+  if (m.includes('spark')) return 'spark';
+  if (m.includes('wonder')) return 'wonder';
+  return null;
+}
+function selectModel({ task, model, tier } = {}) {
+  if (model) {
+    const alias = String(model).trim().toLowerCase();
+    if (MODEL_PROFILES[alias]) return { ...MODEL_PROFILES[alias], explicit: true };
+    const raw = String(model).trim();
+    return { tier: tierOfModel(raw) || 'custom', label: raw, model: raw, providerModel: raw.startsWith('meta/') ? raw : `meta/${raw}`, explicit: true };
+  }
+  let selectedTier;
+  if (tier && MODEL_PROFILES[tier]) selectedTier = tier;
+  else if (LLM_ROUTING === 'wonder' || LLM_ROUTING === 'spark') selectedTier = LLM_ROUTING;
+  else if (LLM_ROUTING === 'primary') {
+    const primaryTier = tierOfModel(LLM_MODEL);
+    return primaryTier ? { ...MODEL_PROFILES[primaryTier], model: LLM_MODEL, providerModel: LLM_PROVIDER_MODEL } : { tier: 'custom', label: LLM_MODEL, model: LLM_MODEL, providerModel: LLM_PROVIDER_MODEL };
+  } else selectedTier = DEEP_TASKS.has(task) ? 'wonder' : 'spark'; // balanced
+  return { ...MODEL_PROFILES[selectedTier] };
+}
+function publicModelConfig() {
+  return {
+    routing: LLM_ROUTING, fallbackEnabled: LLM_FALLBACK_ENABLED,
+    profiles: Object.values(MODEL_PROFILES).map(({ tier, label, model, providerModel, strengths }) => ({ tier, label, model, providerModel, strengths })),
+    primary: { model: LLM_MODEL, providerModel: LLM_PROVIDER_MODEL },
+  };
+}
 const LLM_TEMPERATURE = Number(process.env.LLM_TEMPERATURE ?? 0.4);
 const LLM_MAX_TOKENS = Number(process.env.LLM_MAX_TOKENS || 900);
 const LLM_TIMEOUT_MS = Number(process.env.LLM_TIMEOUT_MS || 30000);
@@ -50,12 +107,68 @@ function resolveLLMEndpoint() {
 }
 function isResponsesStyle() { return resolveLLMEndpoint().endsWith('/responses'); }
 
-// Single LLM caller for both API styles. Returns { text, raw }.
-async function callLLMText({ messages, maxTokens = LLM_MAX_TOKENS, temperature = LLM_TEMPERATURE, tools, timeoutMs, reasoningEffort } = {}) {
+const REASONING_LADDER = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+function downgradeEffort(effort) {
+  const idx = REASONING_LADDER.indexOf(String(effort || 'max').toLowerCase());
+  return REASONING_LADDER[Math.max(0, (idx < 0 ? REASONING_LADDER.length - 1 : idx) - 2)];
+}
+function isTokenExhaustion(err) {
+  return err?.code === 'LLM_TOKEN_EXHAUSTED' || /max_output_tokens|max_tokens.*exhaust|incomplete.*max/i.test(err?.message || '');
+}
+
+// Single LLM caller for both API styles and both Muse models.
+// Recovery order for a failed call:
+//   1. If the model burned its whole output budget on hidden reasoning
+//      ("incomplete, max_output_tokens" — empty visible text), retry the
+//      SAME model with a doubled budget (capped) and reasoning stepped
+//      down two levels. This is the correct fix, not a model switch.
+//   2. Otherwise (or if that still fails), fall back once to the other
+//      Muse model, keeping any escalated budget.
+// Returns { text, raw, modelUsed, modelTier }.
+async function callLLMText(opts = {}) {
   if (!llmConfigured) throw Object.assign(new Error('LLM not configured on the server (set LLM_API_KEY + LLM_BASE_URL in .env).'), { status: 503 });
+  const selection = selectModel(opts);
+  let attemptOpts = opts;
+  try {
+    return await callLLMOnce(selection, attemptOpts);
+  } catch (primaryErr) {
+    if (isTokenExhaustion(primaryErr)) {
+      const currentMax = attemptOpts.maxTokens || LLM_MAX_TOKENS;
+      attemptOpts = {
+        ...attemptOpts,
+        maxTokens: Math.min(Math.max(currentMax * 2, 16000), 48000),
+        reasoningEffort: downgradeEffort(attemptOpts.reasoningEffort ?? (process.env.LLM_REASONING_EFFORT || 'max')),
+      };
+      console.warn(`LLM ${selection.label} exhausted its output budget on task "${opts.task || 'unspecified'}" — retrying with maxTokens=${attemptOpts.maxTokens}, reasoning=${attemptOpts.reasoningEffort}.`);
+      try {
+        const retried = await callLLMOnce(selection, attemptOpts);
+        return { ...retried, tokenEscalated: true };
+      } catch (retryErr) {
+        const fb = await fallbackModel(selection, attemptOpts, retryErr, opts);
+        return { ...fb, tokenEscalated: true };
+      }
+    }
+    return fallbackModel(selection, attemptOpts, primaryErr, opts);
+  }
+}
+
+async function fallbackModel(selection, attemptOpts, err, originalOpts) {
+  const fallbackTier = selection.tier === 'wonder' ? 'spark' : selection.tier === 'spark' ? 'wonder' : null;
+  if (!LLM_FALLBACK_ENABLED || selection.explicit || !fallbackTier || MODEL_PROFILES[fallbackTier].model === selection.model) throw err;
+  console.warn(`LLM ${selection.label} failed for task "${originalOpts.task || 'unspecified'}" (${err.message}) — falling back to ${MODEL_PROFILES[fallbackTier].label}.`);
+  const result = await callLLMOnce({ ...MODEL_PROFILES[fallbackTier] }, attemptOpts);
+  return { ...result, fellBackFrom: selection.model };
+}
+
+async function callLLMOnce(selection, { messages, maxTokens = LLM_MAX_TOKENS, temperature = LLM_TEMPERATURE, tools, timeoutMs, reasoningEffort } = {}) {
   const endpoint = resolveLLMEndpoint();
   const responses = isResponsesStyle();
-  const effort = reasoningEffort ?? (process.env.LLM_REASONING_EFFORT || '');
+  // Responses-style providers default to their highest reasoning effort,
+  // which can burn the entire output budget before any visible text on
+  // long structured prompts. Default to "low" unless a call asks for more.
+  let effort = reasoningEffort ?? (process.env.LLM_REASONING_EFFORT || (responses ? 'low' : ''));
+  // Muse Spark contributor variants top out below "max".
+  if (effort === 'max' && selection.model.includes('contributor')) effort = 'xhigh';
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs || Math.max(LLM_TIMEOUT_MS, 30000));
   try {
@@ -63,8 +176,8 @@ async function callLLMText({ messages, maxTokens = LLM_MAX_TOKENS, temperature =
       method: 'POST', signal: controller.signal,
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${LLM_API_KEY}` },
       body: JSON.stringify(responses
-        ? { model: LLM_MODEL, input: messages, temperature, max_output_tokens: maxTokens, ...(effort ? { reasoning: { effort } } : {}), ...(tools ? { tools } : {}) }
-        : { model: LLM_MODEL, messages, temperature, max_tokens: maxTokens, ...(tools ? { tools } : {}) }),
+        ? { model: selection.model, input: messages, temperature, max_output_tokens: maxTokens, ...(effort ? { reasoning: { effort } } : {}), ...(tools ? { tools } : {}) }
+        : { model: selection.model, messages, temperature, max_tokens: maxTokens, ...(tools ? { tools } : {}) }),
     });
     if (!res.ok) throw Object.assign(new Error(`LLM upstream returned HTTP ${res.status}.`), { status: 502 });
     const json = await res.json();
@@ -75,8 +188,14 @@ async function callLLMText({ messages, maxTokens = LLM_MAX_TOKENS, temperature =
         .map((c) => c.text || c.output_text || '').filter(Boolean).join('\n');
     }
     if (!text) text = json?.choices?.[0]?.message?.content ?? json?.choices?.[0]?.text ?? '';
-    if (!text) throw Object.assign(new Error(`LLM returned an empty response${json.status ? ` (status: ${json.status}${json.incomplete_details?.reason ? `, ${json.incomplete_details.reason}` : ''})` : ''}.`), { status: 502 });
-    return { text, raw: json };
+    if (!text) {
+      const exhausted = json.incomplete_details?.reason === 'max_output_tokens' || json.status === 'incomplete';
+      throw Object.assign(
+        new Error(`LLM returned an empty response${json.status ? ` (status: ${json.status}${json.incomplete_details?.reason ? `, ${json.incomplete_details.reason}` : ''})` : ''}.`),
+        { status: 502, code: exhausted ? 'LLM_TOKEN_EXHAUSTED' : 'LLM_EMPTY' },
+      );
+    }
+    return { text, raw: json, modelUsed: selection.model, modelTier: selection.tier, modelLabel: selection.label };
   } catch (err) {
     if (err.name === 'AbortError') throw Object.assign(new Error('LLM request timed out.'), { status: 502 });
     throw err;
@@ -113,7 +232,7 @@ function rateLimit(req, res, next) {
 // --- API ---
 app.get('/api/health', (req, res) => {
   res.json({
-    ok: true, mode: llmConfigured ? 'live' : 'local', providerModel: LLM_PROVIDER_MODEL, model: LLM_MODEL, agentName: AGENT_NAME,
+    ok: true, mode: llmConfigured ? 'live' : 'local', providerModel: LLM_PROVIDER_MODEL, model: LLM_MODEL, agentName: AGENT_NAME, models: publicModelConfig(),
     vehicleGrounding: {
       mode: 'search-grounded-llm', searchProvider: SEARCH_PROVIDER === 'auto' ? (process.env.SEARCH_API_KEY ? 'tavily' : 'duckduckgo') : SEARCH_PROVIDER,
       nativeGrounding: (process.env.LLM_NATIVE_GROUNDING || '').toLowerCase() === 'true', llmConfigured,
@@ -122,18 +241,54 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-app.get('/api/vehicle-cache', (req, res) => res.json(vehicleCache.stats()));
+app.get('/api/vehicle-cache', (req, res) => res.json(vehicleCache.stats(req.query.market || undefined)));
+// Called when a (possibly new) market is detected/selected in the chat:
+// creates that market's own cache DB if it doesn't exist yet.
+app.post('/api/vehicle-cache/ensure', (req, res) => {
+  const market = String((req.body || {}).market || '').trim().slice(0, 40);
+  if (!market) return res.status(400).json({ error: 'market is required' });
+  return res.json(vehicleCache.ensureMarket(market));
+});
 
 app.post('/api/vehicle-analysis', rateLimit, async (req, res) => {
   const query = String((req.body || {}).query || '').trim().slice(0, 160);
   const refreshStable = (req.body || {}).refreshStable === true;
+  // Any market the chat detected: an ISO country code or a country name.
+  // The grounding layer normalises it (country, local currency, cache).
+  const market = { code: String((req.body || {}).market || '').trim().slice(0, 40), currency: String((req.body || {}).currency || '').trim().toUpperCase().slice(0, 3) };
   if (query.length < 2) return res.status(400).json({ error: 'Tell me a make and model, e.g. "Toyota RAV4".' });
-  if (!llmConfigured) return res.status(503).json({ error: 'Search-grounded vehicle analysis needs Muse Wonder configured on the server (LLM_API_KEY + LLM_BASE_URL in .env).' });
+  if (!llmConfigured) return res.status(503).json({ error: 'Search-grounded vehicle analysis needs an LLM configured on the server (LLM_API_KEY + LLM_BASE_URL in .env).' });
   try {
-    return res.json(await analyseVehicleGrounded(query, { callLLM: callLLMText, refreshStable }));
+    return res.json(await analyseVehicleGrounded(query, { callLLM: callLLMText, refreshStable, market }));
   } catch (err) {
     console.error('Vehicle analysis failed:', err.message);
     return res.status(err.status || 502).json({ error: err.message || 'Vehicle analysis failed.' });
+  }
+});
+
+app.post('/api/vehicle-suggestions', rateLimit, async (req, res) => {
+  const profile = (req.body || {}).profile;
+  if (!profile || typeof profile !== 'object' || Array.isArray(profile)) return res.status(400).json({ error: 'A driver profile is required to suggest vehicles.' });
+  if (!llmConfigured) return res.status(503).json({ error: 'Vehicle suggestions need an LLM configured on the server (LLM_API_KEY + LLM_BASE_URL in .env).' });
+  const market = { code: String((req.body || {}).market || '').trim().slice(0, 40), currency: String((req.body || {}).currency || '').trim().toUpperCase().slice(0, 3) };
+  const guidelines = Array.isArray((req.body || {}).guidelines) ? req.body.guidelines : [];
+  try {
+    return res.json(await suggestVehiclesForProfile({ profile, guidelines, market, callLLM: callLLMText }));
+  } catch (err) {
+    console.error('Vehicle suggestions failed:', err.message);
+    return res.status(err.status || 502).json({ error: err.message || 'Vehicle suggestions failed.' });
+  }
+});
+
+app.post('/api/dealer-offers', rateLimit, async (req, res) => {
+  const { vehicle, location } = req.body || {};
+  if (!llmConfigured) return res.status(503).json({ error: 'Dealer search needs an LLM configured on the server (LLM_API_KEY + LLM_BASE_URL in .env).' });
+  const market = { code: String((req.body || {}).market || '').trim().slice(0, 40), currency: String((req.body || {}).currency || '').trim().toUpperCase().slice(0, 3) };
+  try {
+    return res.json(await findDealerOffers({ vehicle, location, market, callLLM: callLLMText }));
+  } catch (err) {
+    console.error('Dealer offers failed:', err.message);
+    return res.status(err.status || 400).json({ error: err.message || 'Dealer search failed.' });
   }
 });
 
@@ -153,7 +308,10 @@ app.post('/api/agent', rateLimit, async (req, res) => {
   if (!history.length || history[history.length - 1].content !== message) history.push({ role: 'user', content: message });
 
   try {
-    const { text } = await callLLMText({
+    const { text, modelUsed, fellBackFrom, tokenEscalated } = await callLLMText({
+      task: 'agent-chat',
+      maxTokens: Math.max(LLM_MAX_TOKENS, 2500),
+      reasoningEffort: process.env.LLM_REASONING_EFFORT || 'low',
       messages: [
         { role: 'system', content: AGENT_SYSTEM_PROMPT },
         { role: 'system', content: `Current topic index: ${Number(topicIndex) || 0} (${typeof topicId === 'string' ? topicId : 'unknown'}). Profile collected so far (JSON): ${JSON.stringify(profile && typeof profile === 'object' ? profile : {})}` },
@@ -162,7 +320,7 @@ app.post('/api/agent', rateLimit, async (req, res) => {
     });
     const parsed = parseLLMJson(text);
     if (!parsed || typeof parsed.reply !== 'string') return res.status(502).json({ fallback: true, reason: 'LLM returned an unexpected format.' });
-    return res.json({ fallback: false, ...parsed });
+    return res.json({ fallback: false, ...parsed, modelUsed, ...(fellBackFrom ? { fellBackFrom } : {}), ...(tokenEscalated ? { tokenEscalated: true } : {}) });
   } catch (err) {
     console.error('LLM call failed:', err.message);
     return res.status(502).json({ fallback: true, reason: err.message || 'Could not reach the LLM.' });
@@ -187,6 +345,6 @@ app.use((req, res) => res.status(404).json({ error: 'Not found' }));
 app.listen(PORT, () => {
   console.log(`DriveMatch running at http://localhost:${PORT}`);
   console.log(llmConfigured
-    ? `Agent mode: LIVE — Muse Wonder (${LLM_PROVIDER_MODEL}) via ${LLM_BASE_URL}`
-    : 'Agent mode: LOCAL — set LLM_API_KEY + LLM_BASE_URL in .env to enable Muse Wonder.');
+    ? `Agent mode: LIVE — routing=${LLM_ROUTING}, Wonder=${MODEL_PROFILES.wonder.model}, Spark=${MODEL_PROFILES.spark.model}, fallback=${LLM_FALLBACK_ENABLED} via ${LLM_BASE_URL}`
+    : 'Agent mode: LOCAL — set LLM_API_KEY + LLM_BASE_URL in .env to enable an LLM.');
 });
