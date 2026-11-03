@@ -18,6 +18,8 @@
 const path = require('path');
 const fs = require('fs');
 const { analyseVehicleGrounded, suggestVehiclesForProfile, findDealerOffers } = require('./vehicleGrounding');
+const { suggestMods } = require('./modPlanner');
+const { identifyVehicleMods } = require('./modVision');
 const vehicleCache = require('./vehicleCacheDb');
 
 // Load .env if present (Node 24 built-in, no dotenv dependency needed)
@@ -57,7 +59,7 @@ const MODEL_PROFILES = {
 for (const p of Object.values(MODEL_PROFILES)) p.providerModel = p.model.startsWith('meta/') ? p.model : `meta/${p.model}`;
 const LLM_ROUTING = (process.env.LLM_ROUTING || 'balanced').toLowerCase();
 const LLM_FALLBACK_ENABLED = (process.env.LLM_FALLBACK_MODEL || 'true').toLowerCase() !== 'false';
-const DEEP_TASKS = new Set(['vehicle-synthesis', 'vehicle-repair']);
+const DEEP_TASKS = new Set(['vehicle-synthesis', 'vehicle-repair', 'mod-research', 'mod-vision']);
 function tierOfModel(model) {
   const m = String(model || '').toLowerCase();
   if (m.includes('spark')) return 'spark';
@@ -160,9 +162,19 @@ async function fallbackModel(selection, attemptOpts, err, originalOpts) {
   return { ...result, fellBackFrom: selection.model };
 }
 
-async function callLLMOnce(selection, { messages, maxTokens = LLM_MAX_TOKENS, temperature = LLM_TEMPERATURE, tools, timeoutMs, reasoningEffort } = {}) {
+async function callLLMOnce(selection, { messages, maxTokens = LLM_MAX_TOKENS, temperature = LLM_TEMPERATURE, tools, timeoutMs, reasoningEffort, images } = {}) {
   const endpoint = resolveLLMEndpoint();
   const responses = isResponsesStyle();
+  // Optional image attachments (vision calls): formatted per API style
+  // and appended as one extra user turn describing each image in order.
+  let finalMessages = messages;
+  if (Array.isArray(images) && images.length) {
+    const labels = images.map((img, i) => `Image ${i + 1}: ${img.label || 'attachment'}`).join('\n');
+    const parts = responses
+      ? [{ type: 'input_text', text: `Attached images, in order:\n${labels}` }, ...images.map((img) => ({ type: 'input_image', image_url: img.dataUrl }))]
+      : [{ type: 'text', text: `Attached images, in order:\n${labels}` }, ...images.map((img) => ({ type: 'image_url', image_url: { url: img.dataUrl } }))];
+    finalMessages = [...messages, { role: 'user', content: parts }];
+  }
   // Responses-style providers default to their highest reasoning effort,
   // which can burn the entire output budget before any visible text on
   // long structured prompts. Default to "low" unless a call asks for more.
@@ -176,8 +188,8 @@ async function callLLMOnce(selection, { messages, maxTokens = LLM_MAX_TOKENS, te
       method: 'POST', signal: controller.signal,
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${LLM_API_KEY}` },
       body: JSON.stringify(responses
-        ? { model: selection.model, input: messages, temperature, max_output_tokens: maxTokens, ...(effort ? { reasoning: { effort } } : {}), ...(tools ? { tools } : {}) }
-        : { model: selection.model, messages, temperature, max_tokens: maxTokens, ...(tools ? { tools } : {}) }),
+        ? { model: selection.model, input: finalMessages, temperature, max_output_tokens: maxTokens, ...(effort ? { reasoning: { effort } } : {}), ...(tools ? { tools } : {}) }
+        : { model: selection.model, messages: finalMessages, temperature, max_tokens: maxTokens, ...(tools ? { tools } : {}) }),
     });
     if (!res.ok) throw Object.assign(new Error(`LLM upstream returned HTTP ${res.status}.`), { status: 502 });
     const json = await res.json();
@@ -218,7 +230,8 @@ When (and only when) all topics are covered, set is_complete to true, make reply
 
 const app = express();
 app.disable('x-powered-by');
-app.use(express.json({ limit: '100kb' }));
+// Photo uploads (base64 images) need a bigger body limit than chat calls.
+app.use((req, res, next) => express.json({ limit: req.path === '/api/mod-vision' ? '12mb' : '100kb' })(req, res, next));
 
 // --- tiny in-memory rate limit for the agent endpoint (per IP) ---
 const hits = new Map();
@@ -237,6 +250,7 @@ app.get('/api/health', (req, res) => {
       mode: 'search-grounded-llm', searchProvider: SEARCH_PROVIDER === 'auto' ? (process.env.SEARCH_API_KEY ? 'tavily' : 'duckduckgo') : SEARCH_PROVIDER,
       nativeGrounding: (process.env.LLM_NATIVE_GROUNDING || '').toLowerCase() === 'true', llmConfigured,
       stableCache: vehicleCache.stats(),
+      modVision: { segmentation: process.env.SAM_API_URL ? (process.env.SAM_MODEL || 'sam3.1') : 'vision-estimates-only', referencesSupported: 5 },
     },
   });
 });
@@ -292,6 +306,40 @@ app.post('/api/dealer-offers', rateLimit, async (req, res) => {
   }
 });
 
+app.post('/api/mod-suggestions', rateLimit, async (req, res) => {
+  if (!llmConfigured) return res.status(503).json({ error: 'ModMarket research needs an LLM configured on the server (LLM_API_KEY + LLM_BASE_URL in .env).' });
+  const b = req.body || {};
+  const market = { code: String(b.market || '').trim().slice(0, 40), currency: String(b.currency || '').trim().toUpperCase().slice(0, 3) };
+  try {
+    return res.json(await suggestMods({
+      vehicle: String(b.vehicle || '').slice(0, 140), goalsText: String(b.goalsText || '').slice(0, 1000),
+      goalIds: Array.isArray(b.goalIds) ? b.goalIds.slice(0, 8) : [],
+      budgetAmount: b.budgetAmount, currency: String(b.currency || '').trim().toUpperCase().slice(0, 3),
+      market, experience: String(b.experience || '').slice(0, 500), usage: String(b.usage || '').slice(0, 300),
+      notes: String(b.notes || '').slice(0, 500), callLLM: callLLMText,
+    }));
+  } catch (err) {
+    console.error('Mod suggestions failed:', err.message);
+    return res.status(err.status || 502).json({ error: err.message || 'Mod research failed.' });
+  }
+});
+
+app.post('/api/mod-vision', rateLimit, async (req, res) => {
+  if (!llmConfigured) return res.status(503).json({ error: 'Photo identification needs an LLM configured on the server (LLM_API_KEY + LLM_BASE_URL in .env).' });
+  const b = req.body || {};
+  try {
+    return res.json(await identifyVehicleMods({
+      imageDataUrl: b.imageDataUrl,
+      references: Array.isArray(b.references) ? b.references : [],
+      market: { code: String(b.market || '').trim().slice(0, 40), currency: String(b.currency || '').trim().toUpperCase().slice(0, 3) },
+      callLLM: callLLMText,
+    }));
+  } catch (err) {
+    console.error('Mod vision failed:', err.message);
+    return res.status(err.status || 502).json({ error: err.message || 'Photo identification failed.' });
+  }
+});
+
 app.post('/api/agent', rateLimit, async (req, res) => {
   if (!llmConfigured) return res.json({ fallback: true, reason: 'LLM not configured on the server (set LLM_API_KEY + LLM_BASE_URL in .env).' });
 
@@ -337,7 +385,7 @@ function parseLLMJson(content) {
 }
 
 // --- static frontend (never serve secrets / server code) ---
-const BLOCKED = new Set(['/server.js', '/vehicleGrounding.js', '/vehicleCacheDb.js', '/package.json', '/package-lock.json', '/.env', '/.env.example']);
+const BLOCKED = new Set(['/server.js', '/vehicleGrounding.js', '/vehicleCacheDb.js', '/modPlanner.js', '/modVision.js', '/package.json', '/package-lock.json', '/.env', '/.env.example']);
 app.use((req, res, next) => (BLOCKED.has(req.path) || req.path.startsWith('/data/') || req.path.startsWith('/.cache/') ? res.status(404).json({ error: 'Not found' }) : next()));
 app.use(express.static(__dirname, { dotfiles: 'ignore', index: 'index.html' }));
 app.use((req, res) => res.status(404).json({ error: 'Not found' }));

@@ -6,11 +6,11 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "check": "node --check server.js && node --check vehicleGrounding.js && node --check vehicleCacheDb.js && node --check app.js"
+    "check": "node --check server.js && node --check vehicleGrounding.js && node --check vehicleCacheDb.js && node --check modPlanner.js && node --check modVision.js && node --check app.js && node --check modmarket.js"
   },
   "keywords": [],
   "author": "",
-  "license": "ISC",
+  "license": "Apache-2.0",
   "type": "commonjs",
   "dependencies": {
     "express": "^5.3.0"

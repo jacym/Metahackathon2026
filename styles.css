@@ -235,6 +235,51 @@ input[type=range]{accent-color:var(--sky);padding:0!important;border:none!import
 .flex-badge{display:inline-block;font-size:.75rem;font-weight:800;padding:4px 8px;border-radius:99px;background:#f1f5f9;color:var(--muted)}
 .flex-badge.flex-high{background:#dcfce7;color:#15803d}.flex-badge.flex-medium{background:#fef9c3;color:#854d0e}.flex-badge.flex-low{background:#fee2e2;color:#b91c1c}
 
+/* PURCHASE PACK */
+#purchasePanel{margin-top:20px;border:1px solid #bbf7d0;background:linear-gradient(180deg,#f0fdf4,#fff);border-radius:18px;padding:16px}
+.readiness-list{list-style:none;padding:0;margin:10px 0;display:grid;gap:7px}
+.readiness-list li{border:1px solid var(--line);background:#fff;border-radius:10px;padding:8px 11px;font-size:.92rem}
+.readiness-list li.done{border-color:#bbf7d0}.readiness-list li.missing{border-color:#fde68a;background:#fffbeb}
+.message-box{white-space:pre-wrap;background:#0f172a;color:#e2e8f0;border-radius:14px;padding:14px;font-size:.9rem;line-height:1.55;max-height:340px;overflow:auto}
+.tactics-grid{display:grid;gap:10px}
+.tactic-card{border:1px solid var(--line);border-radius:12px;padding:11px 12px;background:#fff}
+.tactic-card h5{margin:0 0 5px}.tactic-card p,.tactic-card li{font-size:.9rem;color:var(--muted)}
+.tactic-card ul{margin:5px 0;padding-left:18px}
+
+/* MODMARKET */
+.mod-hero{background:linear-gradient(180deg,#fdf4ff,#f8fafc)}
+.goal-picker{border:1px dashed #cbd5e1;border-radius:14px;padding:12px;margin:10px 0;background:#f8fafc}
+.goal-picker .chip-group{margin:9px 0}
+.part-price{background:#f0f9ff;border:1px solid #bae6fd;border-radius:10px;padding:8px 11px}
+.part-card{border:1px solid var(--line);border-radius:14px;padding:13px;margin-bottom:10px;background:#fff}
+.part-card h5{margin:0 0 4px;font-size:1rem}
+.part-card p{margin:4px 0;color:var(--muted);font-size:.9rem}
+.stage-block{margin-top:16px}
+.stage-block>h4{border-left:4px solid var(--sky);padding-left:9px}
+.budget-summary{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin:12px 0}
+.budget-summary div{background:#f0f9ff;border:1px solid #bae6fd;border-radius:12px;padding:11px}
+.budget-summary small{display:block;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;font-size:.68rem;font-weight:800}
+.budget-summary strong{font-family:var(--display)}
+.sentiment-mini{display:flex;align-items:center;gap:9px;margin:7px 0}
+.sentiment-mini strong{font-family:var(--display);color:var(--blue)}
+
+/* MOD PHOTO ID */
+#visionPanel{margin-bottom:20px;border-bottom:2px solid var(--line);padding-bottom:18px}
+.photo-wrap{position:relative;border-radius:16px;overflow:hidden;border:1px solid var(--line);background:#0f172a;min-height:120px}
+.photo-wrap img{display:block;width:100%;height:auto}
+.photo-box{position:absolute;border:2px solid #38bdf8;border-radius:8px;box-shadow:0 0 0 2px rgba(15,23,42,.35);pointer-events:none}
+.photo-box span{position:absolute;top:-24px;left:-2px;background:#0284c7;color:#fff;font-size:.68rem;font-weight:800;padding:3px 6px;border-radius:6px;white-space:nowrap;max-width:220px;overflow:hidden;text-overflow:ellipsis}
+.ref-add{margin:10px 0}.ref-add input{width:100%;padding:10px 12px;border:1px solid #cbd5e1;border-radius:10px;font:inherit}
+.ref-thumbs{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0}
+.ref-thumbs figure{margin:0;width:86px}
+.ref-thumbs img{width:86px;height:64px;object-fit:cover;border-radius:9px;border:1px solid var(--line);display:block}
+.ref-thumbs figcaption{font-size:.68rem;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ref-thumbs button{font-size:.68rem}
+.mod-id-card{border:1px solid var(--line);border-radius:12px;padding:11px 12px;margin-bottom:9px;background:#fff}
+.mod-id-card h5{margin:0 0 4px}.mod-id-card p{margin:3px 0;color:var(--muted);font-size:.9rem}
+.conf-pill{font-size:.72rem;font-weight:800;padding:3px 7px;border-radius:99px;background:#f1f5f9;color:var(--muted)}
+.conf-high{background:#dcfce7;color:#15803d}.conf-med{background:#fef9c3;color:#854d0e}.conf-low{background:#fee2e2;color:#b91c1c}
+
 /* CTA + FOOTER */
 .cta-banner{margin-top:36px;background:linear-gradient(135deg,#0f172a,#1e3a5f);color:#fff;border-radius:24px;padding:clamp(24px,4vw,40px);display:flex;align-items:center;justify-content:space-between;gap:20px;flex-wrap:wrap}
 .cta-banner h2{color:#fff} .cta-banner p{color:#cbd5e1;margin:6px 0 0}

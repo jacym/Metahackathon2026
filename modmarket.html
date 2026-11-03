@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ModMarket — Modification Suggestions For Your Car | DriveMatch</title>
+<meta name="description" content="Tell the ModMarket agent your car, your mod goals and your budget. Get a staged parts plan grounded in forum and Reddit sentiment." />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Sora:wght@700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<header class="nav">
+  <a href="index.html" class="logo" aria-label="DriveMatch home"><span class="logo-mark">◈</span> Drive<span>Match</span></a>
+  <span class="pill pill-green">MODMARKET</span>
+  <nav class="nav-links" aria-label="Main">
+    <a href="index.html">Find your car</a>
+    <a href="#mod-agent">Mod agent</a>
+    <a href="#how-mods">How it works</a>
+  </nav>
+  <div class="nav-actions">
+    <span class="mode-pill" id="modModePill">Checking backend…</span>
+    <a class="btn btn-primary btn-sm" href="#mod-agent">Plan My Build →</a>
+  </div>
+</header>
+
+<main>
+<section class="hero mod-hero">
+  <div class="hero-bg" aria-hidden="true"><div class="blob blob-1"></div><div class="blob blob-2"></div><div class="grid-lines"></div></div>
+  <div class="hero-inner">
+    <div class="hero-copy">
+      <div class="eyebrow"><span class="dot"></span> MODMARKET &nbsp;•&nbsp; POWERED BY OWNER SENTIMENT</div>
+      <h1>Modify your car.<br/><em>Love the result.</em></h1>
+      <p class="hero-sub">Tell our mod agent your make and model, what you want to change — carbon dress-up, a tune, handling, sound — and your budget. It researches what owners on <strong>forums and Reddit</strong> actually rate (and regret), then builds you a staged parts plan that fits the money.</p>
+      <div class="hero-ctas">
+        <a class="btn btn-primary btn-lg" href="#mod-agent">Talk to the Mod Agent →</a>
+        <a class="btn btn-outline btn-lg" href="index.html">← Back to finding a car</a>
+      </div>
+      <div class="hero-stats">
+        <div><strong>11</strong><span>Mod categories</span></div>
+        <div><strong>3</strong><span>Questions to a plan</span></div>
+        <div><strong>Live</strong><span>Forum/Reddit sentiment</span></div>
+        <div><strong>0</strong><span>Parts invented</span></div>
+      </div>
+    </div>
+    <div class="hero-visual" aria-hidden="true">
+      <div class="car-card">
+        <div class="car-card-top"><span class="pill pill-green">BUILD PLAN</span><span class="pill">STAGED BY BUDGET</span></div>
+        <h3>Stage 1 — The mods owners actually love</h3>
+        <p>Highest sentiment-per-money first. Big power and big spends wait their turn — with the supporting mods they need.</p>
+        <div class="match-bars">
+          <label>Owner sentiment <span>High</span></label><div class="bar"><i style="width:88%"></i></div>
+          <label>Budget fit <span>Planned</span></label><div class="bar"><i style="width:76%"></i></div>
+          <label>Regret risk <span>Low first</span></label><div class="bar"><i style="width:34%"></i></div>
+        </div>
+      </div>
+      <div class="floating-card fc-1"><span>💬</span><div><strong>Reddit + forums</strong><small>Real owner verdicts</small></div></div>
+      <div class="floating-card fc-2"><span>⚠️</span><div><strong>Honest warnings</strong><small>Warranty, legality, drone…</small></div></div>
+    </div>
+  </div>
+</section>
+
+<section class="section" id="how-mods">
+  <div class="section-head"><div class="eyebrow center">HOW IT WORKS</div><h2>Three questions to a build plan</h2></div>
+  <div class="steps-grid">
+    <article class="step-card"><div class="step-num">01</div><div class="step-icon">🚗</div><h3>Your car</h3><p>Make, model, year/trim/engine if you know it — a Golf GTI and a GT86 take very different parts.</p></article>
+    <article class="step-card"><div class="step-num">02</div><div class="step-icon">🎯</div><h3>Your goals + budget</h3><p>Carbon aero, wheels, a tune, exhaust sound, handling… and what you can spend. Looks, power, or both.</p></article>
+    <article class="step-card"><div class="step-num">03</div><div class="step-icon">🔧</div><h3>Your staged plan</h3><p>Parts owners rate, in the right order, priced in stages against your budget — with what to avoid and why.</p></article>
+  </div>
+</section>
+
+<section class="section onboarding-section" id="mod-agent">
+  <div class="section-head">
+    <div class="eyebrow center">YOUR MOD AGENT</div>
+    <h2>Let's plan your build</h2>
+    <p>Chat below. Tap goal chips to add them, type in your own words anytime, and the agent will research a plan from live forum/Reddit sentiment and parts sources.</p>
+  </div>
+
+  <div class="agent-layout">
+    <div class="chat-panel" aria-label="Chat with the ModMarket agent">
+      <div class="chat-head">
+        <div class="agent-id"><span class="agent-avatar" aria-hidden="true">⚙</span><div><strong>Max</strong><small>Your ModMarket agent</small></div></div>
+        <span class="mode-pill" id="agentModePill">Checking backend…</span>
+        <button type="button" class="btn btn-ghost btn-sm" id="modRestartBtn">↺ Restart</button>
+      </div>
+
+      <ol class="topic-progress" id="modProgress" aria-label="Build progress"></ol>
+
+      <div class="chat-tools">
+        <button type="button" class="chip tool-chip" id="chatUploadBuildBtn">⬆ Upload a saved build</button>
+        <button type="button" class="chip tool-chip" id="photoUploadBtn">📷 Identify mods from a photo</button>
+        <button type="button" class="chip tool-chip" id="refUploadBtn">🖼️ Add reference photo</button>
+      </div>
+      <input type="file" id="photoInput" accept="image/jpeg,image/png,image/webp" hidden />
+      <input type="file" id="refInput" accept="image/jpeg,image/png,image/webp" hidden />
+
+      <div class="goal-picker" id="goalPicker" hidden>
+        <strong>Tap everything you're interested in, then hit Done:</strong>
+        <div class="chip-group" id="goalChips"></div>
+        <button type="button" class="btn btn-primary btn-sm" id="goalDoneBtn">Done — next →</button>
+      </div>
+
+      <div class="chat-messages" id="modMessages" aria-live="polite" aria-label="Conversation"></div>
+      <div class="typing" id="modTyping" hidden><span></span><span></span><span></span> Max is researching… (grounded plans can take a minute)</div>
+      <div class="quick-replies" id="modQuickReplies" aria-label="Suggested replies"></div>
+
+      <form class="chat-form" id="modForm">
+        <label class="sr-only" for="modInput">Message Max</label>
+        <textarea id="modInput" rows="1" placeholder="Type your answer… (Enter to send)" autocomplete="off"></textarea>
+        <button type="submit" class="btn btn-primary" id="modSendBtn">Send →</button>
+      </form>
+      <p class="chat-hint" id="modHint">Checking the backend…</p>
+    </div>
+
+    <aside class="profile-panel" aria-label="Your build plan">
+      <div class="profile-head"><h3>Your Build Plan</h3><span class="save-note" id="modSaveNote" role="status"></span></div>
+
+      <div id="visionPanel" hidden>
+        <div class="vehicle-panel-head"><h3>📷 Photo Identification</h3><span class="pill" id="visionBadge">Vision</span></div>
+        <p class="guidelines-sub">Upload a photo of a vehicle and Max will identify the make/model and the mods he can actually see — with confidence and evidence, never guesses. Add up to 5 labelled <strong>reference photos</strong> (e.g. "stock front end", "carbon splitter") and he'll compare against them: references genuinely help on subtle calls like wrap vs paint or OEM vs aftermarket wheels.</p>
+        <div class="photo-wrap" id="photoWrap"></div>
+        <div id="refList"></div>
+        <div class="ref-add">
+          <input type="text" id="refLabel" placeholder="Label for next reference photo (e.g. stock front end)" />
+          <small>Pick a label, then tap “Add reference photo” above.</small>
+        </div>
+        <div id="visionContent"></div>
+        <div class="summary-actions">
+          <button type="button" class="btn btn-primary btn-sm" id="analysePhotoBtn">🔎 Analyse this photo</button>
+          <button type="button" class="btn btn-outline btn-sm" id="researchModsBtn" disabled>🔧 Research these mods / build around them</button>
+        </div>
+      </div>
+
+      <div id="buildPanel"><p class="empty-state">Nothing here yet. Tell Max your car, your goals and your budget — your staged parts plan, sentiment and budget breakdown will appear here.</p></div>
+      <div class="summary-actions">
+        <button type="button" class="btn btn-primary btn-sm" id="buildPlanBtn">🔧 Build My Plan</button>
+        <button type="button" class="btn btn-outline btn-sm" id="regenBuildBtn" disabled>↻ Regenerate this build</button>
+        <button type="button" class="btn btn-outline btn-sm" id="downloadBuildBtn">⬇ Download plan (.json)</button>
+        <button type="button" class="btn btn-outline btn-sm" id="uploadBuildBtn">⬆ Upload a build (.json)</button>
+        <a class="btn btn-ghost btn-sm" href="index.html">← DriveMatch</a>
+      </div>
+      <input type="file" id="buildUploadInput" accept="application/json,.json" hidden />
+      <p class="guidelines-sub">Saved a build before? Upload its JSON and Max will restore it — then hit <strong>Regenerate</strong> to re-research it with today's parts, prices and sentiment.</p>
+    </aside>
+  </div>
+</section>
+
+<section class="section alt">
+  <div class="section-head"><div class="eyebrow center">POPULAR STARTING POINTS</div><h2>Need inspiration?</h2><p>Tap one and Max will start from there — your budget and taste still decide the plan.</p></div>
+  <div class="vehicle-grid">
+    <article class="vehicle-card"><span>🏎️</span><h3>Hot hatch, Stage 1 tune</h3><p>Intake, tune and tyres — the classic first chapter.</p><button class="link-btn" data-build="Volkswagen Golf GTI" data-goals="power-tune,wheels-tyres">Start this build →</button></article>
+    <article class="vehicle-card"><span>✨</span><h3>Carbon dress-up</h3><p>Splitter, skirts, diffuser and spoiler — looks without touching the engine.</p><button class="link-btn" data-build="" data-goals="carbon-aero,lighting-wrap">Start this build →</button></article>
+    <article class="vehicle-card"><span>🎯</span><h3>Handling first</h3><p>Coilovers, sway bars, alignment and brakes, done in the right order.</p><button class="link-btn" data-build="" data-goals="suspension,handling,brakes">Start this build →</button></article>
+    <article class="vehicle-card"><span>🔊</span><h3>Sound, not drone</h3><p>Exhausts owners love at cruise — and the ones they rip off in a month.</p><button class="link-btn" data-build="" data-goals="exhaust-sound">Start this build →</button></article>
+    <article class="vehicle-card"><span>🏔️</span><h3>Trail-ready</h3><p>Lift, all-terrains and protection for weekends off the map.</p><button class="link-btn" data-build="" data-goals="offroad,wheels-tyres">Start this build →</button></article>
+    <article class="vehicle-card"><span>🛞</span><h3>Wheels make the car</h3><p>Fitment, offsets and tyres that transform looks and grip together.</p><button class="link-btn" data-build="" data-goals="wheels-tyres,suspension">Start this build →</button></article>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="footer-inner">
+    <a href="index.html" class="logo light">◈ Drive<span>Match</span></a>
+    <p>ModMarket is part of DriveMatch. Plans are grounded in public web sources retrieved at the time you ask — sentiment is estimated from those sources, prices are indicative, and nothing here is mechanical or legal advice. Always confirm fitment, warranty and emissions/legality for your exact car before ordering.</p>
+    <nav><a href="index.html">Find your car</a><a href="#mod-agent">Mod agent</a><a href="#how-mods">How it works</a></nav>
+    <small>© 2026 DriveMatch — ModMarket v0.1</small>
+  </div>
+</footer>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<script src="modmarket.js"></script>
+</body>
+</html>

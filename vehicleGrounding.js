@@ -818,7 +818,8 @@ async function findDealerOffers({ vehicle, location, market: marketInput, callLL
   const make = vehicleName.split(/\s+/)[0];
   const searches = [
     { type: 'dealer-offers', query: `${vehicleName} dealer near ${place} offers incentives special offers price` },
-    { type: 'dealer-inventory', query: `${make} dealership ${place} new ${vehicleName} inventory deals` },
+    { type: 'dealer-inventory', query: `${vehicleName} for sale near ${place} in stock dealer inventory listed price buy` },
+    { type: 'dealer-inventory', query: `${make} dealership ${place} new ${vehicleName} inventory deals for sale` },
     { type: 'manufacturer-incentives', query: `${vehicleName} current incentives rebates finance offers ${market.country || ''} ${today.slice(0, 7)}` },
     { type: 'dealer-reviews', query: `best ${make} dealers near ${place} reviews pricing negotiation` },
   ];
@@ -829,7 +830,7 @@ async function findDealerOffers({ vehicle, location, market: marketInput, callLL
   const { text } = await callLLM({
     task: 'dealer-research',
     messages: [
-      { role: 'system', content: `You are DriveMatch's grounded dealer-research analyst. Today is ${today}. Using ONLY the web sources provided, extract dealers near the user's location that sell the vehicle, any publicly advertised offers, and an evidence-based estimate of pricing flexibility. Rules: only include dealers/offers actually named in the sources, each with its sourceId; never invent dealer names, distances, prices, discounts or stock — distanceText only if a source states it; an offer only if a source states its terms. Pricing flexibility must be judged ONLY from public signals in the sources (advertised discounts below list price, manufacturer rebates/incentives, clearance/model-year offers, low-rate finance combined with cash offers, multiple competing offers) and labelled an estimate, never a guarantee. Return ONLY valid JSON: {"dealers":[{"name":"","brand":"","area":"","distanceText":"","offerTitle":"","offerDetails":"","priceText":"","sourceId":"S1"}],"flexibility":{"level":"high|medium|low|unknown","rationale":"","signals":[],"confidence":"high|medium|low"},"negotiationTips":[]}` },
+      { role: 'system', content: `You are DriveMatch's grounded dealer-research analyst. Today is ${today}. Using ONLY the web sources provided, extract dealers near the user's location that sell the vehicle, any publicly advertised offers, and an evidence-based estimate of pricing flexibility. Rules: only include dealers/offers actually named in the sources, each with its sourceId; a dealer only counts if a source indicates it sells, lists or stocks this vehicle (or is a franchised dealer for the brand in that area); never invent dealer names, distances, prices, discounts or stock — distanceText and availabilityText only if a source states them (e.g. "in stock", "3 available", a listed for-sale price); an offer only if a source states its terms. Pricing flexibility must be judged ONLY from public signals in the sources (advertised discounts below list price, manufacturer rebates/incentives, clearance/model-year offers, low-rate finance combined with cash offers, multiple competing offers) and labelled an estimate, never a guarantee. Return ONLY valid JSON: {"dealers":[{"name":"","brand":"","area":"","distanceText":"","availabilityText":"","offerTitle":"","offerDetails":"","priceText":"","sourceId":"S1"}],"flexibility":{"level":"high|medium|low|unknown","rationale":"","signals":[],"confidence":"high|medium|low"},"negotiationTips":[]}` },
       { role: 'user', content: `Vehicle: ${vehicleName}\nNear: ${place}${market.country ? ` (${market.country})` : ''}\n\nWEB SOURCES:\n${sourceText}` },
     ],
     maxTokens: Number(process.env.DEALER_MAX_TOKENS || 5000), temperature: 0.2,
@@ -842,6 +843,7 @@ async function findDealerOffers({ vehicle, location, market: marketInput, callLL
     if (!source || !str(d.name, 120)) return null;
     return {
       name: str(d.name, 120), brand: str(d.brand, 60), area: str(d.area, 100), distanceText: str(d.distanceText, 60),
+      availabilityText: str(d.availabilityText, 120),
       offerTitle: str(d.offerTitle, 140), offerDetails: str(d.offerDetails, 320), priceText: str(d.priceText, 120),
       sourceId: source.id, sourceTitle: source.title, url: source.url, domain: source.domain,
     };
@@ -872,4 +874,4 @@ function parseJson(content) {
   } catch { return null; }
 }
 
-module.exports = { analyseVehicleGrounded, retrieveSources, buildSearchQueries, buildStableEntry, sanitiseCommonIssues, sanitiseSentiment, normalizeMarket, suggestVehiclesForProfile, findDealerOffers, scoreCandidate, parseBudgetRange };
+module.exports = { analyseVehicleGrounded, retrieveSources, buildSearchQueries, buildStableEntry, sanitiseCommonIssues, sanitiseSentiment, normalizeMarket, suggestVehiclesForProfile, findDealerOffers, scoreCandidate, parseBudgetRange, runSearches };

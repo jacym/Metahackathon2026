@@ -108,6 +108,7 @@ function emptyProfile() {
     budget: '', monthly: '', payment: '', keepYears: '', tradeIn: '', timeline: '',
     priorities: {}, prioritiesMentioned: [], notes: '',
     interestedVehicle: '', sourceVehicle: '',
+    selectedVehicle: '', purchaseTrim: '', purchaseColour: '', downPayment: '', preApproval: '', tradeInDetails: '', contactMethod: '',
     country: '', countryCode: '', postalCode: '',
   };
 }
@@ -229,10 +230,20 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   $('#suggestBtn').addEventListener('click', () => { if (!started) startAgent(); runVehicleSuggestions(); });
   $('#suggestionsContent').addEventListener('click', (e) => {
+    const selectBtn = e.target.closest('[data-suggest-select]');
     const analyseBtn = e.target.closest('[data-suggest-analyse]');
     const dealerBtn = e.target.closest('[data-suggest-dealers]');
+    if (selectBtn) selectVehicle(selectBtn.dataset.suggestSelect);
     if (analyseBtn) { addMessage('user', `Analyse a ${analyseBtn.dataset.suggestAnalyse}`); runVehicleAnalysis(analyseBtn.dataset.suggestAnalyse); }
     if (dealerBtn) runDealerOffers(dealerBtn.dataset.suggestDealers);
+  });
+  $('#purchaseContent').addEventListener('click', (e) => {
+    const dealersBtn = e.target.closest('[data-purchase-dealers]');
+    const copyBtn = e.target.closest('[data-purchase-copy]');
+    const downloadBtn = e.target.closest('[data-purchase-download]');
+    if (dealersBtn) runDealerOffers(dealersBtn.dataset.purchaseDealers);
+    if (copyBtn) copyDealerMessage();
+    if (downloadBtn) downloadDealerMessage();
   });
   $('#downloadBtn').addEventListener('click', downloadProfile);
   $('#pdfBtn').addEventListener('click', () => { downloadGuidelinesPdf(); showToast('Choose "Save as PDF" in the print dialog to save your guidelines.'); });
@@ -478,10 +489,17 @@ async function submitInput() {
         if (!profile.location && text.trim().length <= 80) profile.location = text.trim();
         extractFromText(text, 'intro');
         await runDealerOffers(vehicle);
+        if (profile.selectedVehicle === vehicle) presentPurchasePack();
         handled = true;
       }
     }
     if (!handled && isComplete) handled = handleConfirmationFlow(text);
+    // Purchase flows need purchase context or an explicit request —
+    // otherwise this message is an answer to Maya's current question
+    // (e.g. the budget answer) and the profile flow must handle it so
+    // she asks the expected follow-up towards the guidelines.
+    const purchaseContext = isComplete || !!profile.selectedVehicle || !!currentVehicleAnalysis;
+    if (!handled && (purchaseContext || isExplicitPurchaseRequest(text))) handled = handlePurchaseFlow(text);
     if (!handled && /\b(suggest|recommend|which|what)\b.*\b(vehicle|car|matches|buy)\b|\bvehicles for me\b|\bfind my matches\b/i.test(text) && !/\bsimilar\b/i.test(text)) {
       await runVehicleSuggestions();
       handled = true;
@@ -560,7 +578,8 @@ function renderSuggestions() {
       ${c.reasons?.length ? `<ul class="match-reasons">${c.reasons.map((r) => `<li>${escapeHtml(r)}</li>`).join('')}</ul>` : ''}
       ${c.tradeoffs?.length ? `<p class="match-tradeoff">⚖️ Trade-off: ${escapeHtml(c.tradeoffs[0])}</p>` : ''}
       <div class="summary-actions">
-        <button type="button" class="btn btn-primary btn-sm" data-suggest-analyse="${escapeHtml(name)}">🔎 Analyse this vehicle</button>
+        <button type="button" class="btn btn-primary btn-sm" data-suggest-select="${escapeHtml(name)}">✅ Select this vehicle</button>
+        <button type="button" class="btn btn-outline btn-sm" data-suggest-analyse="${escapeHtml(name)}">🔎 Analyse this vehicle</button>
         <button type="button" class="btn btn-outline btn-sm" data-suggest-dealers="${escapeHtml(name)}">📍 Nearby dealers &amp; offers</button>
       </div>
       <div class="dealer-box" id="dealers-${escapeHtml(name.replace(/\W+/g, '-'))}">${dealerData ? dealerHtml(dealerData) : ''}</div>
@@ -575,6 +594,7 @@ function dealerHtml(d) {
     ${d.dealers?.length ? d.dealers.map((dealer) => `
       <div class="dealer-card"><h5>${escapeHtml(dealer.name)}</h5>
         ${dealer.area || dealer.distanceText ? `<p>📍 ${escapeHtml([dealer.area, dealer.distanceText].filter(Boolean).join(' · '))}</p>` : ''}
+        ${dealer.availabilityText ? `<p>🚗 <strong>For sale:</strong> ${escapeHtml(dealer.availabilityText)}</p>` : '<p>🚗 Listed by this dealer in the sources — confirm current stock before travelling.</p>'}
         ${dealer.offerTitle ? `<p><strong>Offer:</strong> ${escapeHtml(dealer.offerTitle)}${dealer.priceText ? ` — ${escapeHtml(dealer.priceText)}` : ''}</p>` : ''}
         ${dealer.offerDetails ? `<p>${escapeHtml(dealer.offerDetails)}</p>` : ''}
         <p><a href="${escapeHtml(dealer.url)}" target="_blank" rel="noopener noreferrer">View source (${escapeHtml(dealer.domain)})</a></p>
@@ -621,6 +641,167 @@ function dealerSummaryText(d) {
   if (!d.dealers?.length) return `I searched public sources for ${d.vehicle} dealers and offers near ${d.location}, but nothing solid surfaced — so I haven't invented any dealers. The panel explains what was checked; a wider location or the manufacturer's dealer locator is the next step. Pricing flexibility here is unknown from public signals.`;
   const first = d.dealers[0];
   return `Dealer search for the ${d.vehicle} near ${d.location} 📍\n\nI found ${d.dealers.length} grounded dealer lead${d.dealers.length === 1 ? '' : 's'} in public sources — for example ${first.name}${first.offerTitle ? ` advertising "${first.offerTitle}"` : ''}. Pricing flexibility looks ${d.flexibility.level} based on public signals (${d.flexibility.rationale})\n\nFull dealer cards, offers, sources and negotiation tips are in the panel. These are public web listings, not live stock — confirm price and availability with the dealer before travelling.`;
+}
+
+// ---------------- Selected vehicle -> dealers -> purchase pack ----------------
+async function selectVehicle(vehicleName) {
+  if (!vehicleName) return;
+  profile.selectedVehicle = vehicleName;
+  profile.interestedVehicle = vehicleName;
+  if (!started) startAgent();
+  addMessage('agent', `Great choice — the ${vehicleName} is now your selected vehicle ✅\n\nLet me find dealerships near you that have it for sale, and I'll build your purchase pack: dealer options, the questions a salesperson will ask (and which ones you still need to answer), a message you can send today, and how to avoid paying for extras you don't need.`);
+  renderProfilePanel(); renderPurchasePanel(); save();
+  const location = dealerLocationText();
+  if (location) {
+    await runDealerOffers(vehicleName);
+    presentPurchasePack();
+  } else {
+    pendingDealerVehicle = vehicleName;
+    addMessage('agent', `First — what city and ${currentMarket().postalLabel} should I search dealerships around?`);
+    $('#chatInput')?.focus({ preventScroll: true });
+  }
+}
+
+function purchaseReadiness() {
+  const fin = (() => { try { return getFinanceInputs(); } catch { return {}; } })();
+  const down = profile.downPayment || (fin.deposit ? formatMoney(fin.deposit, fin.currency || currentCurrency()) : '');
+  const items = [
+    { label: 'Vehicle', value: profile.selectedVehicle || profile.interestedVehicle, question: 'Which exact vehicle?' },
+    { label: 'Trim & colour', value: [profile.purchaseTrim, profile.purchaseColour].filter(Boolean).join(' · '), question: 'Which trim and colour — or are you flexible?' },
+    { label: 'New or used', value: profile.condition, question: 'New, used, or either?' },
+    { label: 'Target budget (out-the-door)', value: profile.budget, question: 'What total budget should the dealer quote against?' },
+    { label: 'How you\'ll pay', value: profile.payment, question: 'Cash, finance, or lease?' },
+    { label: 'Down payment', value: down, question: 'How much can you put down?' },
+    { label: 'Monthly comfort zone', value: profile.monthly, question: 'Is there a monthly figure you must stay under?' },
+    { label: 'Finance pre-approval', value: profile.payment && /cash/i.test(profile.payment) ? 'Not needed (cash)' : profile.preApproval, question: 'Have you got finance pre-approval, or should the dealer quote finance?' },
+    { label: 'Trade-in', value: profile.tradeIn === 'Yes' ? (profile.tradeInDetails || 'Yes — details still needed') : profile.tradeIn, question: 'Any trade-in? Year/make/model, mileage, condition, and anything owed on it.' },
+    { label: 'Buying timeline', value: profile.timeline, question: 'When do you want to buy, and when could you test-drive?' },
+    { label: 'Where you\'ll buy', value: dealerLocationText(), question: 'Which city/postal area should dealers be near?' },
+    { label: 'Best contact', value: profile.contactMethod, question: 'Best phone/email and times to reach you?' },
+  ];
+  return items.map((i) => ({ ...i, done: !!(i.value && String(i.value).trim()) }));
+}
+
+function buildDealerMessage() {
+  const vehicle = profile.selectedVehicle || profile.interestedVehicle || '[vehicle]';
+  const analysis = currentVehicleAnalysis;
+  const trimText = profile.purchaseTrim || (analysis?.trims?.length ? `I'm flexible between the ${analysis.trims.slice(0, 3).map((t) => t.name).join(' / ')} trims if pricing makes sense` : '[trim — or flexible if pricing makes sense]');
+  const colourText = profile.purchaseColour || '[colour — or flexible]';
+  const fin = (() => { try { return getFinanceInputs(); } catch { return {}; } })();
+  const downText = profile.downPayment || (fin.deposit ? formatMoney(fin.deposit, fin.currency || currentCurrency()) : '[down payment amount]');
+  const missing = (label) => `[${label}]`;
+  return `Subject: ${vehicle} — availability and out-the-door quote
+
+Hi there,
+
+I'm ${profile.firstName || missing('your name')} from ${dealerLocationText() || missing('your city/postal area')}, and I'm interested in buying a ${vehicle}.
+
+What I'm looking for:
+• Trim: ${trimText}
+• Colour: ${colourText}
+• ${profile.fuel ? `Powertrain preference: ${profile.fuel}` : 'Powertrain: flexible'}
+• ${profile.condition || 'New or used: flexible'}
+${profile.features?.length ? `• Must-haves: ${profile.features.join(', ')}` : ''}
+
+To help me move quickly, could you please confirm:
+1. What you currently have in stock (or incoming) that matches, with trim, colour and mileage if used
+2. An itemised out-the-door price for each — vehicle price, taxes, and every fee/add-on listed separately
+3. Which manufacturer incentives/rebates apply to me and when they expire
+4. Whether any dealer add-ons are fitted, and confirmation I can decline optional ones
+
+My situation, so you have everything up front:
+• Budget: ${profile.budget || missing('your total budget')} (out-the-door)
+• Payment: ${profile.payment || missing('cash / finance / lease')}${profile.payment && /financ|loan/i.test(profile.payment) ? ` — ${profile.preApproval ? `pre-approval: ${profile.preApproval}` : 'not pre-approved yet, so please also quote your best finance terms'}; down payment ${downText}${profile.monthly ? `; I'd like to stay around ${profile.monthly}` : ''}` : ''}
+• Trade-in: ${profile.tradeIn === 'Yes' ? (profile.tradeInDetails || missing('trade-in year/make/model, mileage, condition, amount owed')) : (profile.tradeIn || missing('any trade-in?'))} — please quote the car and the trade-in as two separate numbers
+• Timeline: ${profile.timeline || missing('when you want to buy / test-drive')}
+• Best contact: ${profile.contactMethod || missing('your phone/email')}
+
+I'd like to arrange a test drive once I have the out-the-door figures. Thanks very much,
+
+${profile.firstName || missing('your name')}`;
+}
+
+function renderPurchasePanel() {
+  const panel = $('#purchasePanel');
+  const vehicle = profile.selectedVehicle;
+  if (!vehicle) { panel.hidden = true; return; }
+  panel.hidden = false;
+  $('#purchasePanelTitle').textContent = `🛒 Purchase Pack — ${vehicle}`;
+  const readiness = purchaseReadiness();
+  const missing = readiness.filter((i) => !i.done);
+  const dealerData = dealerResults[vehicle];
+  const fin = (() => { try { return getFinanceInputs(); } catch { return {}; } })();
+  const termComparison = fin.price ? [48, 60, 72, 84].map((months) => {
+    const r = calculateFinance({ ...fin, termMonths: months });
+    return `<li><strong>${months} months:</strong> ${formatMoney(r.monthly, fin.currency)}/mo · total interest ${formatMoney(r.totalInterest, fin.currency)}</li>`;
+  }).join('') : '';
+  $('#purchaseContent').innerHTML = `
+    ${dealerData ? dealerHtml(dealerData) : `<p class="empty-state">No dealer search yet for this vehicle.${dealerLocationText() ? '' : ' Tell Maya your city/postal area first.'}</p>
+    <div class="summary-actions"><button type="button" class="btn btn-primary btn-sm" data-purchase-dealers="${escapeHtml(vehicle)}">📍 Find dealerships that have it for sale</button></div>`}
+    <h4 style="margin-top:16px">✅ Salesperson blocker questions — your answers</h4>
+    <p class="guidelines-sub">These are the questions that stall a purchase. Maya has filled in what she knows; anything amber is worth answering in chat before you contact a dealer.</p>
+    <ul class="readiness-list">${readiness.map((i) => `<li class="${i.done ? 'done' : 'missing'}">${i.done ? '✅' : '🟡'} <strong>${escapeHtml(i.label)}:</strong> ${i.done ? escapeHtml(i.value) : `<em>Still needed — ${escapeHtml(i.question)}</em>`}</li>`).join('')}</ul>
+    ${missing.length ? `<p><small>Tip: just tell Maya the missing pieces in one message (e.g. "No trade-in, ${escapeHtml(currentCurrency())} 5,000 down, pre-approved, email me") and she'll complete the draft.</small></p>` : '<p>🎉 Everything a salesperson usually asks is covered — you\'re ready to send the message below.</p>'}
+    <h4 style="margin-top:16px">✉️ Message you can send to the dealership</h4>
+    <div class="message-box" id="dealerMessageBox">${escapeHtml(buildDealerMessage())}</div>
+    <div class="summary-actions">
+      <button type="button" class="btn btn-primary btn-sm" data-purchase-copy>📋 Copy message</button>
+      <button type="button" class="btn btn-outline btn-sm" data-purchase-download>⬇ Download message (.txt)</button>
+    </div>
+    <h4 style="margin-top:16px">🛡️ Don't pay for what you don't need</h4>
+    ${salesTacticsHtml(fin, termComparison)}
+  `;
+}
+function salesTacticsHtml(fin, termComparison) {
+  const mustHaves = profile.features || [];
+  return `<div class="tactics-grid">
+    <div class="tactic-card"><h5>1. Negotiate the out-the-door total — never the monthly first</h5>
+      <p>"What monthly payment works for you?" is how a long term hides a higher total. Agree the itemised out-the-door price (car + tax + every fee, listed separately) before any finance talk.${termComparison ? `<br><strong>On your current calculator figures, term length alone does this:</strong></p><ul>${termComparison}</ul><p>Same car, same price — a longer term just rents more money for longer. Pick the shortest term whose payment you can genuinely afford.` : ' A longer term lowers the monthly figure but increases total interest — always compare <strong>total interest</strong>, not the monthly number.'}</p></div>
+    <div class="tactic-card"><h5>2. Packages &amp; add-ons: need vs nice vs decline</h5>
+      <ul>
+        <li><strong>Worth it if it matches your life:</strong> ${mustHaves.length ? `the must-haves already on your profile (${escapeHtml(mustHaves.join(', '))})` : 'safety/driver-assistance tech you will use daily'}, all-weather mats and roof/cargo gear if you carry ${escapeHtml((profile.cargo || []).join(', ').toLowerCase() || 'gear/pets/kids')}${profile.terrain?.includes('Snow / ice') ? ', winter-tyre packages where you drive' : ''}, and a manufacturer tow package only if you will actually tow.</li>
+        <li><strong>Situational:</strong> extended warranty/maintenance plans (you can usually buy these later, and from other providers — never decide under pressure in the finance office), GAP cover only if your deposit is small or the term is long, paint/interior protection only if the price beats independent detailers.</li>
+        <li><strong>Usually decline:</strong> nitrogen-filled tyres, VIN etching, key/fob "insurance", fabric sprays, dealer "protection packages" already fitted at inflated prices, market-adjustment markups, and any add-on you can't remove from the quote. Ask: <em>"Please remove every optional dealer add-on and re-quote."</em></li>
+      </ul></div>
+    <div class="tactic-card"><h5>3. Finance-office tactics to expect</h5>
+      <ul>
+        <li>Get your own pre-approval first — it turns the dealer's finance into a price to beat, not your only option.</li>
+        <li>Compare APR <em>and</em> total interest over the term; "we can hit your monthly" often means a longer term or a higher price, not a better rate.</li>
+        <li>Quote the car and any trade-in as <strong>two separate numbers</strong> — a generous trade-in can hide an inflated car price (and vice versa).</li>
+        <li>Check incentive eligibility fine print (finance-with-us, loyalty, recent-model or stock conditions) and expiry dates before travelling.</li>
+        <li>Ask whether any deposit is refundable, in writing, before paying it — and confirm the exact car (trim/colour/VIN or stock number) the quote is for.</li>
+      </ul></div>
+    <div class="tactic-card"><h5>4. Before you sign</h5>
+      <ul>
+        <li>Get competing out-the-door quotes from at least two dealers (your dealer results in this pack are a starting list) — competing written quotes are your leverage.</li>
+        <li>Test-drive the exact trim if you can; check your must-haves are on that car, not just the brochure model.</li>
+        <li>Read every line of the final invoice against your itemised quote. New fees appearing at signing are a reason to pause, not to hurry.</li>
+      </ul></div>
+  </div>`;
+}
+function presentPurchasePack() {
+  renderPurchasePanel();
+  const readiness = purchaseReadiness();
+  const missing = readiness.filter((i) => !i.done);
+  const dealerData = dealerResults[profile.selectedVehicle];
+  addMessage('agent', `Your purchase pack for the ${profile.selectedVehicle} is ready in the panel 🛒\n\n${dealerData?.dealers?.length ? `I found ${dealerData.dealers.length} dealership lead${dealerData.dealers.length === 1 ? '' : 's'} that list or sell it near ${dealerData.location} — with public offers and a pricing-flexibility estimate.` : 'Dealer results are in the panel.'}\n${missing.length ? `Before you contact them, ${missing.length} usual blocker question${missing.length === 1 ? ' is' : 's are'} still unanswered: ${missing.map((m) => m.label.toLowerCase()).join(', ')}. Just tell me those in one message and I'll finish your draft.` : 'Every usual salesperson blocker question is already answered in your draft.'}\n\nI've also drafted the message you can send the dealership (it asks for an itemised out-the-door price and separable trade-in numbers), plus a playbook for the common tactics — negotiating by monthly payment, long terms that inflate total interest, and add-ons you can decline. Copy it from the panel, or say "draft my dealer message" to see it here.`);
+  customQuickReplies = ['✉️ Draft my dealer message', '🛡️ Show sales tactics playbook', '📍 Find nearby dealers', '🚗 Suggest vehicles for me'];
+  renderQuickReplies();
+  $('#purchasePanel')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+async function copyDealerMessage() {
+  const text = buildDealerMessage();
+  try { await navigator.clipboard.writeText(text); showToast('Dealer message copied — paste it into an email or enquiry form.'); }
+  catch {
+    const ta = document.createElement('textarea'); ta.value = text; document.body.appendChild(ta); ta.select();
+    document.execCommand('copy'); ta.remove(); showToast('Dealer message copied.');
+  }
+}
+function downloadDealerMessage() {
+  const blob = new Blob([buildDealerMessage()], { type: 'text/plain' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+  a.download = `dealer-message-${(profile.selectedVehicle || 'vehicle').toLowerCase().replace(/[^a-z0-9]+/g, '-')}.txt`; a.click();
+  URL.revokeObjectURL(a.href); showToast('Dealer message downloaded.');
 }
 
 // ---------------- Vehicle analysis flow ----------------
@@ -696,7 +877,7 @@ async function runVehicleAnalysis(query) {
     profile.interestedVehicle = `${data.vehicle.make} ${data.vehicle.model}`;
     renderVehiclePanel(true);
     addMessage('agent', vehicleSummaryText(data));
-    customQuickReplies = ['Build my profile from this vehicle', 'Show similar vehicles', 'What do owners complain about?', 'Open financing calculator'];
+    customQuickReplies = ['✅ Select this vehicle — find dealers', 'Build my profile from this vehicle', 'Show similar vehicles', 'What do owners complain about?'];
     save();
     return data;
   } catch (err) {
@@ -790,6 +971,60 @@ function finishConversation(prefix = '') {
   const persona = inferPersona(profile);
   const tops = topPriorities(profile, 3);
   return `${prefix ? prefix + '\n\n' : ''}That's everything I need — thanks${profile.firstName ? ', ' + profile.firstName : ''}! 🎉\n\nHere's who I'm shopping for: ${persona.name} — ${persona.blurb}\nTop priorities: ${tops.join(', ') || 'balanced across the board'}.\n\nI've built your vehicle-selection guidelines in the panel beside this chat. Before we use them: does this profile look right? Tap "Confirm my profile" and I'll show the full guidelines here and give you download and vehicle-suggestion options — or tell me what to change.`;
+}
+
+// Purchase intents (playbook, dealer draft/search, selection) must not
+// hijack ordinary answers while Maya is mid-questionnaire. A budget
+// answer like "I don't want to pay more than $35k over a longer term"
+// is an ANSWER to her budget question — not a request for the sales
+// playbook. So: purchase flows only fire when there is purchase
+// context (profile complete, a vehicle selected/analysed) or when the
+// user explicitly asks for them in request/question phrasing.
+function isExplicitPurchaseRequest(text) {
+  const lower = text.toLowerCase();
+  return /\b(draft|write|compose|help me write)\b[^.]*\b(dealer|dealership|message|email)\b/.test(lower)
+    || /\bdealer message\b/.test(lower)
+    || /\b(sales tactics|dealer tactics|playbook|negotiat\w*\s+(tips|advice|help|strateg\w*)|how\s+(do|can|should)\s+i\s+negotiat|how\s+.*\bavoid\b.*(paying|dealer|add[- ]?ons?)|what\s+.*(add[- ]?ons?|packages).*(need|avoid|worth|necessary))\b/.test(lower)
+    || /\b(find|show|search|list)\b[^.]*\bdealers?\b/.test(lower)
+    || /\bwhere\s+(can|do)\s+i\s+buy\b/.test(lower)
+    || /\bdealers?\s+near\b/.test(lower);
+}
+
+function handlePurchaseFlow(text) {
+  const lower = text.toLowerCase().trim();
+  const selected = profile.selectedVehicle || (currentVehicleAnalysis ? `${currentVehicleAnalysis.vehicle.make} ${currentVehicleAnalysis.vehicle.model}` : '');
+
+  if (/\b(draft|write|compose).*((dealer|dealership) message|email)|\bdealer message\b/.test(lower)) {
+    if (!selected) { addMessage('agent', 'Happy to draft that — first tell me which vehicle you\'ve chosen (or analyse/select one), and I\'ll write the message around it.'); return true; }
+    if (!profile.selectedVehicle) profile.selectedVehicle = selected;
+    renderPurchasePanel();
+    addMessage('agent', `Here's a message you can send to a dealership about the ${selected} ✉️\n\n${buildDealerMessage()}\n\nYou can copy or download it from your Purchase Pack in the panel. Anything in [brackets] still needs your details — tell me here and I'll complete it.`);
+    customQuickReplies = ['📍 Find nearby dealers', '🛡️ Show sales tactics playbook', '🚗 Suggest vehicles for me'];
+    return true;
+  }
+  if (/\b(sales tactics|dealer tactics|playbook|negotiat\w*\s+(tips|advice|help|strateg\w*)|how\s+(do|can|should)\s+i\s+negotiat|how\s+.*\bavoid\b.*(paying|dealer|add[- ]?ons?)|what\s+.*(add[- ]?ons?|packages).*(need|avoid|worth|necessary))\b/.test(lower)) {
+    addMessage('agent', `Here's the short version of the playbook 🛡️\n\n• Negotiate the itemised out-the-door total first — "what monthly works for you?" is how a longer term hides a higher total. A longer term only lowers the monthly figure; it increases total interest, so always compare total interest, not the monthly.\n• Packages: pay for what matches your life (your must-haves${profile.features?.length ? ` — ${profile.features.join(', ')}` : ''}), treat warranties/maintenance plans as "decide later, shop around", and decline nitrogen tyres, VIN etching, protection sprays and fitted "protection packages" — ask them to remove every optional add-on and re-quote.\n• Finance: bring your own pre-approval, quote the car and any trade-in as two separate numbers, check incentive eligibility/expiry, and confirm any deposit is refundable in writing.\n\nYour full personalised playbook — including what term length does to your actual calculator figures — is in your Purchase Pack in the panel.`);
+    if (profile.selectedVehicle) renderPurchasePanel();
+    return true;
+  }
+  if (/\b(find|show|nearby|local|which).*(dealer|dealership)|\bwhere (can|do) i buy\b|\bdealers near\b/.test(lower)) {
+    if (!selected) { addMessage('agent', 'Tell me which vehicle you\'ve set your heart on and I\'ll find dealerships near you that have it for sale.'); return true; }
+    if (!profile.selectedVehicle) { profile.selectedVehicle = selected; renderPurchasePanel(); }
+    runDealerOffers(profile.selectedVehicle).then(() => { if (profile.selectedVehicle) presentPurchasePack(); });
+    return true;
+  }
+  const selectMatch = lower.match(/\b(?:i (?:like|want|choose|chose|select)|select|i'?ll take|going with|let'?s go with)\b.*$/);
+  // A money-bearing message ("I want to spend $30k on the RAV4") is a
+  // budget answer, not a vehicle selection.
+  const moneySignal = /[$€£¥₹]|\b(spend|spending|budget|per month|monthly|down payment)\b/.test(lower);
+  if (selectMatch && !moneySignal && currentVehicleAnalysis && !profile.selectedVehicle) {
+    // "I like this one" with an analysis open selects that vehicle.
+    if (/\b(this|it|one)\b/.test(lower) || lower.includes(currentVehicleAnalysis.vehicle.model.toLowerCase())) {
+      selectVehicle(`${currentVehicleAnalysis.vehicle.make} ${currentVehicleAnalysis.vehicle.model}`);
+      return true;
+    }
+  }
+  return false;
 }
 
 // ---- Confirmation, in-chat guidelines, downloads ----
@@ -956,6 +1191,22 @@ function extractFromText(text, topicId) {
   if (/asap|right away|immediately|within (?:two|2) weeks/.test(lower)) profile.timeline = 'ASAP (within 2 weeks)';
   else if (/this month|within a month|next month/.test(lower)) profile.timeline = 'Within 1 month';
   else if (/research|just looking|no rush|browsing/.test(lower)) profile.timeline = 'Just researching';
+
+  // Purchase-readiness details (used by the dealer message draft)
+  if (currentVehicleAnalysis) {
+    for (const trim of currentVehicleAnalysis.trims || []) if (trim.name && lower.includes(trim.name.toLowerCase())) profile.purchaseTrim = trim.name;
+    for (const colour of currentVehicleAnalysis.exteriorColours || []) if (colour.name && lower.includes(colour.name.toLowerCase())) profile.purchaseColour = colour.name;
+  }
+  m = lower.match(/(?:down payment|deposit|put down|down)\s*(?:is|of|:)?\s*\$?\s?(\d[\d,]*(?:\.\d+)?)\s*(k)?/);
+  if (m && /down|deposit/.test(lower)) profile.downPayment = formatMoney(parseFloat(m[1].replace(/,/g, '')) * (m[2] ? 1000 : 1), currentCurrency());
+  if (/pre[- ]?approved|pre[- ]?approval (?:sorted|done)|already approved/.test(lower)) profile.preApproval = 'Yes';
+  else if (/not (?:yet )?pre[- ]?approved|haven'?t.*pre[- ]? approv|no pre[- ]?approval/.test(lower)) profile.preApproval = 'Not yet';
+  if (/no trade[- ]?in|nothing to trade|no car to trade/.test(lower)) profile.tradeIn = 'No';
+  else if (/trade[- ]?in is|my trade[- ]?in/.test(lower)) { profile.tradeIn = 'Yes'; const seg = text.split(/trade[- ]?in is/i)[1]?.split(/[.!?\n]/)[0]?.trim(); if (seg) profile.tradeInDetails = seg.slice(0, 160); }
+  const email = text.match(/[\w.+-]+@[\w-]+\.[\w.]+/);
+  const phone = text.match(/(?:\+?\d[\d\s().-]{7,}\d)/);
+  if (email) profile.contactMethod = email[0];
+  else if (phone && /call|text|phone|reach me|contact/.test(lower)) profile.contactMethod = phone[0].trim();
 
   // Priorities (mention = high score; explicit "don't care" = low)
   for (const p of PRIORITY_DEFS) {
@@ -1185,9 +1436,11 @@ function renderVehiclePanel(resetFinance = false) {
     </div>
     ${citationsHtml}
     <div class="summary-actions">
-      <button type="button" class="btn btn-primary" id="vehicleToProfileBtn">✨ Generate a Draft Profile From This Vehicle</button>
+      <button type="button" class="btn btn-primary" id="selectVehicleBtn">✅ Select This Vehicle — Find Dealers</button>
+      <button type="button" class="btn btn-outline" id="vehicleToProfileBtn">✨ Generate a Draft Profile From This Vehicle</button>
     </div>`;
   $('#vehicleToProfileBtn').addEventListener('click', applyVehicleProfile);
+  $('#selectVehicleBtn').addEventListener('click', () => selectVehicle(`${v.make} ${v.model}`));
   if (resetFinance) setupFinanceDefaults(d);
   renderFinanceResults();
 }
@@ -1393,6 +1646,7 @@ function renderProfilePanel() {
     $('#guidelinesContent').innerHTML = guidelines.map((g) => `<div class="guideline-block ${g.type}"><h4>${escapeHtml(g.title)}</h4><ul>${g.points.map((pt) => `<li>${escapeHtml(pt)}</li>`).join('')}</ul></div>`).join('');
   } else gp.hidden = true;
   if (profile.firstName) $('#fcName').textContent = `Welcome, ${profile.firstName}!`;
+  renderPurchasePanel();
 }
 
 // ---------------- Persistence / misc ----------------
