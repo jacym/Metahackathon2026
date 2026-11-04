@@ -74,7 +74,7 @@ LLM_FALLBACK_MODEL=true
 - `LLM_ROUTING` decides which model each agent uses: `balanced` (Wonder for deep research, Spark for everyday chat — recommended), `wonder`, `spark`, or `primary` (pin `LLM_MODEL` for everything). **Every agent, including ModMarket, follows this same setting.**
 - To run absolutely everything on one model, set `LLM_ROUTING=spark` (fastest/cheapest) or `LLM_ROUTING=wonder`, restart, and check `/api/health` (Step 5) to confirm.
 
-### Step 4 — (Recommended) Add a search API key
+### Step 4 — (Optional) Add a search API key
 
 Search grounding powers vehicle analysis, suggestions, dealer search and ModMarket. For reliable results, add one of these to `.env`:
 
